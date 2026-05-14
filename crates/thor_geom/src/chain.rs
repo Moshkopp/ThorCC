@@ -1,4 +1,4 @@
-use kurbo::{PathEl, BezPath, flatten};
+use kurbo::{BezPath, PathEl, flatten};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,23 +21,20 @@ impl ChainEngine {
     /// Converts a BezPath into a sampled list of points
     pub fn sample_path(&self, path: &BezPath, z: f64, feed: f64) -> Vec<ToolpathPoint> {
         let mut points = Vec::new();
-        
-        flatten(path, self.tolerance, |el| {
-            match el {
-                PathEl::MoveTo(p) | PathEl::LineTo(p) => {
-                    points.push(ToolpathPoint {
-                        x: p.x,
-                        y: p.y,
-                        z,
-                        feed,
-                    });
-                }
-                PathEl::ClosePath => {
-                }
-                _ => {}
+
+        flatten(path, self.tolerance, |el| match el {
+            PathEl::MoveTo(p) | PathEl::LineTo(p) => {
+                points.push(ToolpathPoint {
+                    x: p.x,
+                    y: p.y,
+                    z,
+                    feed,
+                });
             }
+            PathEl::ClosePath => {}
+            _ => {}
         });
-        
+
         points
     }
 }

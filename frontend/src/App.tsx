@@ -1,6 +1,6 @@
 import { createSignal, Component, onMount, Show, For } from 'solid-js';
 import Viewport from './components/Viewport';
-import { ThorClient } from './api/client';
+import { DrawObject, ThorClient } from './api/client';
 
 const App: Component = () => {
   const [mode, setMode] = createSignal<'Sketch' | 'Nesting' | 'CAM' | 'Simulation'>('Sketch');
@@ -21,6 +21,9 @@ const App: Component = () => {
       if (msg.type === 'UpdateHistory') {
         setHistory(msg.items);
       }
+      if (msg.type === 'Error') {
+        setStatus(msg.message);
+      }
     });
   });
 
@@ -36,7 +39,7 @@ const App: Component = () => {
     setStatus(`Active Tool: ${tool.toUpperCase()}`);
   };
 
-  const onObjectAdded = (obj: any) => {
+  const onObjectAdded = (obj: DrawObject) => {
     if (client) {
       client.send({ type: 'AddObject', object: obj });
       setHistory(prev => [`${obj.type} added`, ...prev]);

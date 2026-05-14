@@ -1,12 +1,28 @@
-use serde::{Deserialize, Serialize};
 use kurbo::Point;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Entity {
-    Point { id: String, pos: Point },
-    Line { id: String, p1: String, p2: String },
-    Circle { id: String, center: String, radius: f64 },
-    Arc { id: String, center: String, start: String, end: String },
+    Point {
+        id: String,
+        pos: Point,
+    },
+    Line {
+        id: String,
+        p1: String,
+        p2: String,
+    },
+    Circle {
+        id: String,
+        center: String,
+        radius: f64,
+    },
+    Arc {
+        id: String,
+        center: String,
+        start: String,
+        end: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,7 +50,7 @@ pub struct Solver {
 
 impl Solver {
     pub fn new() -> Self {
-        Self { 
+        Self {
             tolerance: 1e-6,
             max_iterations: 50,
         }

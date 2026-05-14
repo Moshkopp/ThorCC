@@ -1,11 +1,12 @@
 import { Component, onMount, onCleanup } from 'solid-js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
+import { DrawObject } from '../api/client';
 
 interface ViewportProps {
   mode: 'Sketch' | 'Nesting' | 'CAM' | 'Simulation';
   activeTool: string | null;
-  onObjectAdded: (obj: any) => void;
+  onObjectAdded: (obj: DrawObject) => void;
 }
 
 const Viewport: Component<ViewportProps> = (props) => {
@@ -81,7 +82,7 @@ const Viewport: Component<ViewportProps> = (props) => {
                         ? new THREE.Line(new THREE.BufferGeometry().setFromPoints(new THREE.CatmullRomCurve3(polyPoints).getPoints(50)), mat)
                         : new THREE.Line(geo, mat);
                     scene.add(m);
-                    props.onObjectAdded({ type: props.activeTool.toUpperCase(), points: polyPoints.map(p => [p.x, p.y]) });
+                    props.onObjectAdded({ type: props.activeTool.toUpperCase() as 'POLYLINE' | 'SPLINE', points: polyPoints.map(p => [p.x, p.y]) });
                 }
                 polyPoints = [];
                 isDrawing = false;
@@ -125,7 +126,7 @@ const Viewport: Component<ViewportProps> = (props) => {
                     m.position.set(startPoint.x, startPoint.y, 0);
                     m.rotation.z = Math.PI / sides;
                     addMesh(m);
-                    props.onObjectAdded({ type: props.activeTool.toUpperCase(), center: [startPoint.x, startPoint.y], radius });
+                    props.onObjectAdded({ type: props.activeTool.toUpperCase() as 'TRIANGLE' | 'HEXAGON' | 'OCTAGON', center: [startPoint.x, startPoint.y], radius });
                 }
             }
             
