@@ -19,18 +19,32 @@ use tower_http::{
 };
 
 mod project;
-use project::Project;
+use project::{DimensionAnnotation, Project};
 use thor_geom::Point;
 use thor_geom::cam::{CamOperation, CamStrategy, Tool, generate_profile};
 use thor_geom::chain::ToolpathPoint;
 use thor_geom::post_processor::GCodeEmitter;
-use thor_geom::sketcher::{Entity, Solver};
+use thor_geom::sketcher::{Constraint, DimensionTarget, Entity, Solver};
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type")]
 enum ClientMessage {
-    AddObject { object: DrawObject },
-    UpdatePoint { id: String, x: f64, y: f64 },
+    AddObject {
+        object: DrawObject,
+    },
+    AddConstraint {
+        constraint: Constraint,
+    },
+    AddDimension {
+        target: DimensionTarget,
+        value: f64,
+        offset: Option<[f64; 2]>,
+    },
+    UpdatePoint {
+        id: String,
+        x: f64,
+        y: f64,
+    },
     ExportGCode,
 }
 
@@ -116,6 +130,13 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 }
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
+    {
+        let project = state.project.lock().await;
+        let _ = socket
+            .send(Message::Text(project_state_message(&project)))
+            .await;
+    }
+
     while let Some(msg) = socket.recv().await {
         if let Ok(Message::Text(text)) = msg {
             let parsed: Result<ClientMessage, _> = serde_json::from_str(&text);
@@ -125,12 +146,43 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     let mut project = state.project.lock().await;
                     let label = object.label();
                     add_object_to_project(&mut project, object);
-                    let response = serde_json::json!({
-                        "type": "UpdateHistory",
-                        "items": project_history(&project)
-                    })
-                    .to_string();
+                    let response = project_state_message(&project);
                     println!("Added {}", label);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::AddConstraint { constraint }) => {
+                    let mut project = state.project.lock().await;
+                    project.sketch.constraints.push(constraint);
+                    let solver = Solver::new();
+                    solver.solve(&mut project.sketch);
+                    let response = project_state_message(&project);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::AddDimension {
+                    target,
+                    value,
+                    offset,
+                }) => {
+                    let mut project = state.project.lock().await;
+                    let response = match project.sketch.add_dimension(target.clone(), value) {
+                        Ok(()) => {
+                            if let Some(offset) = offset {
+                                project.annotations.push(DimensionAnnotation {
+                                    target,
+                                    value,
+                                    offset,
+                                });
+                            }
+                            let solver = Solver::new();
+                            solver.solve(&mut project.sketch);
+                            project_state_message(&project)
+                        }
+                        Err(err) => serde_json::json!({
+                            "type": "Error",
+                            "message": format!("Invalid dimension target: {:?}", err)
+                        })
+                        .to_string(),
+                    };
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::UpdatePoint { id, x, y }) => {
@@ -149,7 +201,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     let solver = Solver::new();
                     solver.solve(&mut project.sketch);
 
-                    let response = serde_json::to_string(&project.sketch).unwrap();
+                    let response = project_state_message(&project);
                     drop(project);
                     let _ = socket.send(Message::Text(response)).await;
                 }
@@ -205,6 +257,15 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
             break;
         }
     }
+}
+
+fn project_state_message(project: &Project) -> String {
+    serde_json::json!({
+        "type": "Sketch",
+        "sketch": project.sketch,
+        "annotations": project.annotations,
+    })
+    .to_string()
 }
 
 impl DrawObject {
@@ -336,13 +397,6 @@ fn add_point(
         pos: Point::new(coords[0], coords[1]),
     });
     id
-}
-
-fn project_history(project: &Project) -> Vec<String> {
-    vec![format!(
-        "{} entities in sketch",
-        project.sketch.entities.len()
-    )]
 }
 
 fn sketch_contours(project: &Project) -> Vec<Vec<[f64; 2]>> {

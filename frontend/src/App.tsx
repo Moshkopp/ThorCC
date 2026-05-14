@@ -1,6 +1,6 @@
-import { createSignal, Component, onMount, Show, For } from 'solid-js';
+import { createSignal, Component, onMount, onCleanup, Show, For } from 'solid-js';
 import Viewport from './components/Viewport';
-import { DrawObject, ThorClient } from './api/client';
+import { DimensionAnnotation, DimensionTarget, DrawObject, Sketch, SketchConstraint, ThorClient } from './api/client';
 
 const App: Component = () => {
   const [mode, setMode] = createSignal<'Sketch' | 'Nesting' | 'CAM' | 'Simulation'>('Sketch');
@@ -8,6 +8,8 @@ const App: Component = () => {
   const [status, setStatus] = createSignal("Ready");
   const [activeTool, setActiveTool] = createSignal<string | null>(null);
   const [history, setHistory] = createSignal<string[]>([]);
+  const [sketch, setSketch] = createSignal<Sketch | null>(null);
+  const [annotations, setAnnotations] = createSignal<DimensionAnnotation[]>([]);
   
   let client: ThorClient | undefined;
 
@@ -21,10 +23,29 @@ const App: Component = () => {
       if (msg.type === 'UpdateHistory') {
         setHistory(msg.items);
       }
+      if (msg.type === 'Sketch') {
+        setSketch(msg.sketch);
+        setAnnotations(msg.annotations ?? []);
+        setStatus("Sketch Updated");
+        setHistory([
+          `${msg.sketch.entities.length} entities in sketch`,
+          `${msg.sketch.constraints.length} constraints in sketch`,
+          `${(msg.annotations ?? []).length} dimensions in sketch`,
+        ]);
+      }
       if (msg.type === 'Error') {
         setStatus(msg.message);
       }
     });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setActiveTool(null);
+      setStatus("Ready");
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    onCleanup(() => window.removeEventListener('keydown', handleKeyDown));
   });
 
   const handleGenerate = () => {
@@ -36,7 +57,13 @@ const App: Component = () => {
 
   const handleToolClick = (tool: string) => {
     setActiveTool(tool);
-    setStatus(`Active Tool: ${tool.toUpperCase()}`);
+    if (tool === 'select') {
+      setStatus("SELECT: click geometry in the viewport");
+    } else if (['horiz', 'vert', 'parallel', 'coincident', 'equal', 'dimension', 'radius', 'diameter', 'angle'].includes(tool)) {
+      setStatus(`${tool.toUpperCase()}: click geometry in the viewport`);
+    } else {
+      setStatus(`Draw ${tool.toUpperCase()}: click start and end points`);
+    }
   };
 
   const onObjectAdded = (obj: DrawObject) => {
@@ -46,7 +73,23 @@ const App: Component = () => {
     }
   };
 
+  const onDimensionAdded = (target: DimensionTarget, value: number, offset?: [number, number]) => {
+    client?.send({ type: 'AddDimension', target, value, offset });
+    setHistory(prev => [`Dimension ${value.toFixed(2)} added`, ...prev]);
+  };
+
+  const onConstraintAdded = (constraint: SketchConstraint) => {
+    client?.send({ type: 'AddConstraint', constraint });
+    setHistory(prev => [`Constraint added`, ...prev]);
+  };
+
+  const onViewportFeedback = (message: string) => {
+    setStatus(message);
+    setHistory(prev => [message, ...prev].slice(0, 12));
+  };
+
   const tools = [
+    { id: 'select', icon: '↖', label: 'SELECT' },
     { id: 'line', icon: '╱', label: 'LINE' },
     { id: 'circle', icon: '◯', label: 'CIRCLE' },
     { id: 'rect', icon: '□', label: 'RECT' },
@@ -64,6 +107,10 @@ const App: Component = () => {
     { id: 'parallel', icon: '//', label: 'PARA' },
     { id: 'coincident', icon: '⚬', label: 'COIN' },
     { id: 'equal', icon: '=', label: 'EQUAL' },
+    { id: 'dimension', icon: '↔', label: 'DIM' },
+    { id: 'radius', icon: 'R', label: 'RAD' },
+    { id: 'diameter', icon: 'Ø', label: 'DIA' },
+    { id: 'angle', icon: '∠', label: 'ANGLE' },
   ];
 
   return (
@@ -170,12 +217,22 @@ const App: Component = () => {
         <div class="flex-1 relative bg-black flex items-center justify-center">
             {/* Viewport Ambient Grid */}
             <div class="absolute inset-0 opacity-[0.05] pointer-events-none" style="background-image: radial-gradient(#fff 1px, transparent 1px); background-size: 50px 50px;"></div>
-            <Viewport mode={mode()} activeTool={activeTool()} onObjectAdded={onObjectAdded} />
+            <Viewport
+              mode={mode()}
+              activeTool={activeTool()}
+              sketch={sketch()}
+              annotations={annotations()}
+              onObjectAdded={onObjectAdded}
+              onDimensionAdded={onDimensionAdded}
+              onConstraintAdded={onConstraintAdded}
+              onFeedback={onViewportFeedback}
+            />
             
             {/* Context Tooltip */}
             <Show when={activeTool()}>
                 <div class="absolute bottom-10 left-1/2 -translate-x-1/2 px-6 py-3 bg-[#00aaff] text-black rounded-2xl font-black text-xs tracking-widest shadow-2xl animate-bounce">
-                    CLICK TO START {activeTool()?.toUpperCase()}
+                    {['select', 'horiz', 'vert', 'parallel', 'coincident', 'equal', 'dimension', 'radius', 'diameter', 'angle'].includes(activeTool() || '') ? 'CLICK GEOMETRY FOR ' : 'CLICK TO START '}
+                    {activeTool()?.toUpperCase()}
                 </div>
             </Show>
         </div>

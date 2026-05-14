@@ -1,10 +1,18 @@
 use serde::{Deserialize, Serialize};
-use thor_geom::sketcher::Sketch;
+use thor_geom::sketcher::{DimensionTarget, Sketch};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DimensionAnnotation {
+    pub target: DimensionTarget,
+    pub value: f64,
+    pub offset: [f64; 2],
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Project {
     pub name: String,
     pub sketch: Sketch,
+    pub annotations: Vec<DimensionAnnotation>,
 }
 
 impl Project {
@@ -15,6 +23,7 @@ impl Project {
                 entities: Vec::new(),
                 constraints: Vec::new(),
             },
+            annotations: Vec::new(),
         }
     }
 
