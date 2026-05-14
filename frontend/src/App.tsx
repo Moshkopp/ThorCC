@@ -1,4 +1,4 @@
-import { createSignal, Component, onMount, onCleanup, Show, For } from 'solid-js';
+import { createSignal, Component, onMount, onCleanup, For } from 'solid-js';
 import Viewport from './components/Viewport';
 import { DimensionAnnotation, DimensionTarget, DrawObject, Sketch, SketchConstraint, ThorClient } from './api/client';
 
@@ -227,14 +227,6 @@ const App: Component = () => {
               onConstraintAdded={onConstraintAdded}
               onFeedback={onViewportFeedback}
             />
-            
-            {/* Context Tooltip */}
-            <Show when={activeTool()}>
-                <div class="absolute bottom-10 left-1/2 -translate-x-1/2 px-6 py-3 bg-[#00aaff] text-black rounded-2xl font-black text-xs tracking-widest shadow-2xl animate-bounce">
-                    {['select', 'horiz', 'vert', 'parallel', 'coincident', 'equal', 'dimension', 'radius', 'diameter', 'angle'].includes(activeTool() || '') ? 'CLICK GEOMETRY FOR ' : 'CLICK TO START '}
-                    {activeTool()?.toUpperCase()}
-                </div>
-            </Show>
         </div>
       </main>
 
