@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/thor_geom",
+    "crates/thor_server",
+]
+resolver = "2"

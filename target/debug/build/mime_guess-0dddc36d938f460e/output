@@ -1,0 +1,1 @@
+cargo:rustc-env=MIME_TYPES_GENERATED_PATH=/home/moshy/Dokumente/Coding/ThorCC/target/debug/build/mime_guess-0dddc36d938f460e/out/mime_types_generated.rs
