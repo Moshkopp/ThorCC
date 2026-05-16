@@ -88,7 +88,9 @@ export class ThorClient {
   send(msg: ClientMessage) {
     if (this.ws?.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify(msg));
+      return true;
     }
+    return false;
   }
 
   updatePoint(id: string, x: number, y: number) {

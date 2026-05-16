@@ -76,13 +76,13 @@ const App: Component = () => {
   };
 
   const handleSketchUndo = () => {
-    client?.send({ type: 'SketchUndo' });
-    setStatus("Sketch Undo");
+    const sent = client?.send({ type: 'SketchUndo' }) ?? false;
+    setStatus(sent ? "Sketch Undo" : "Sketch Undo: backend not connected");
   };
 
   const handleSketchRedo = () => {
-    client?.send({ type: 'SketchRedo' });
-    setStatus("Sketch Redo");
+    const sent = client?.send({ type: 'SketchRedo' }) ?? false;
+    setStatus(sent ? "Sketch Redo" : "Sketch Redo: backend not connected");
   };
 
   const handleToolClick = (tool: string) => {

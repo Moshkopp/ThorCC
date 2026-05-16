@@ -279,14 +279,28 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                 }
                 Ok(ClientMessage::SketchUndo) => {
                     let mut state = state.project.lock().await;
-                    sketch_undo(&mut state);
-                    let response = project_state_message(&state.project);
+                    let response = if sketch_undo(&mut state) {
+                        project_state_message(&state.project)
+                    } else {
+                        serde_json::json!({
+                            "type": "Error",
+                            "message": "Sketch undo stack is empty"
+                        })
+                        .to_string()
+                    };
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::SketchRedo) => {
                     let mut state = state.project.lock().await;
-                    sketch_redo(&mut state);
-                    let response = project_state_message(&state.project);
+                    let response = if sketch_redo(&mut state) {
+                        project_state_message(&state.project)
+                    } else {
+                        serde_json::json!({
+                            "type": "Error",
+                            "message": "Sketch redo stack is empty"
+                        })
+                        .to_string()
+                    };
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::UpdatePoint { id, x, y }) => {
@@ -397,22 +411,24 @@ fn push_sketch_undo(state: &mut ProjectState) {
     commit_sketch_undo(state, snapshot);
 }
 
-fn sketch_undo(state: &mut ProjectState) {
+fn sketch_undo(state: &mut ProjectState) -> bool {
     let Some(previous) = state.sketch_undo.pop() else {
-        return;
+        return false;
     };
     let current = sketch_snapshot(&state.project);
     state.sketch_redo.push(current);
     restore_sketch_snapshot(&mut state.project, previous);
+    true
 }
 
-fn sketch_redo(state: &mut ProjectState) {
+fn sketch_redo(state: &mut ProjectState) -> bool {
     let Some(next) = state.sketch_redo.pop() else {
-        return;
+        return false;
     };
     let current = sketch_snapshot(&state.project);
     state.sketch_undo.push(current);
     restore_sketch_snapshot(&mut state.project, next);
+    true
 }
 
 fn update_dimension_value(project: &mut Project, index: usize, value: f64) -> Result<(), String> {
@@ -1033,6 +1049,30 @@ fn circle_contour(center: &Point, radius: f64, segments: usize) -> Vec<[f64; 2]>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sketch_undo_and_redo_restore_only_sketch_snapshot() {
+        let mut state = ProjectState {
+            project: Project::new("test"),
+            sketch_undo: Vec::new(),
+            sketch_redo: Vec::new(),
+        };
+
+        push_sketch_undo(&mut state);
+        add_object_to_project(
+            &mut state.project,
+            DrawObject::Line {
+                p1: [0.0, 0.0],
+                p2: [10.0, 0.0],
+            },
+        );
+
+        assert_eq!(state.project.sketch.entities.len(), 3);
+        assert!(sketch_undo(&mut state));
+        assert_eq!(state.project.sketch.entities.len(), 0);
+        assert!(sketch_redo(&mut state));
+        assert_eq!(state.project.sketch.entities.len(), 3);
+    }
 
     #[test]
     fn add_rect_creates_closed_line_contour() {
