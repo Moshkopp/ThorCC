@@ -1,0 +1,31 @@
+{
+  "format": "thorcc.project",
+  "file_version": 1,
+  "saved_at": 1778911741,
+  "comment": "Test",
+  "project": {
+    "name": "Papaerlappp",
+    "sketch": {
+      "entities": [
+        {
+          "Point": {
+            "id": "p0_0",
+            "pos": {
+              "x": -165.0,
+              "y": 80.0
+            }
+          }
+        },
+        {
+          "Circle": {
+            "id": "circle_0",
+            "center": "p0_0",
+            "radius": 99.62429422585636
+          }
+        }
+      ],
+      "constraints": []
+    },
+    "annotations": []
+  }
+}

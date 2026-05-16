@@ -22,3 +22,6 @@ Thumbs.db
 # Local agent workspace metadata
 /.agents/
 /.codex/
+
+# Projekts 
+projekts/

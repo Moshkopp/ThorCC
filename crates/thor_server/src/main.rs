@@ -9,10 +9,13 @@ use axum::{
 };
 use axum_embed::ServeEmbed;
 use rust_embed::RustEmbed;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 use tower_http::{
     cors::{Any, CorsLayer},
@@ -55,6 +58,27 @@ enum ClientMessage {
     },
     SketchUndo,
     SketchRedo,
+    ListProjects,
+    QuickSaveProject,
+    SaveProject {
+        name: String,
+        comment: Option<String>,
+    },
+    LoadProject {
+        id: String,
+        version: Option<usize>,
+    },
+    DeleteProject {
+        id: String,
+    },
+    ExportProject {
+        id: Option<String>,
+        version: Option<usize>,
+    },
+    ImportProject {
+        name: Option<String>,
+        content: String,
+    },
     UpdatePoint {
         id: String,
         x: f64,
@@ -71,6 +95,34 @@ struct PointUpdate {
     id: String,
     x: f64,
     y: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ThorccFile {
+    format: String,
+    file_version: u32,
+    saved_at: u64,
+    #[serde(default)]
+    comment: Option<String>,
+    project: Project,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectEntry {
+    id: String,
+    name: String,
+    versions: usize,
+    current_version: usize,
+    updated_at: u64,
+    version_entries: Vec<ProjectVersionEntry>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ProjectVersionEntry {
+    version: usize,
+    saved_at: u64,
+    comment: Option<String>,
+    project: Project,
 }
 
 #[derive(Debug, Deserialize)]
@@ -300,6 +352,76 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                             "message": "Sketch redo stack is empty"
                         })
                         .to_string()
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::ListProjects) => {
+                    let response = projects_message();
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::QuickSaveProject) => {
+                    let state = state.project.lock().await;
+                    let id = slugify(&state.project.name);
+                    let response = match project_versions(&id) {
+                        Ok(versions) if !versions.is_empty() => {
+                            let version = versions.len();
+                            let comment = read_thorcc(&versions[version - 1]).ok().and_then(|f| f.comment);
+                            match write_thorcc(&version_path(&id, version), &state.project, comment.as_deref()) {
+                                Ok(_) => projects_message(),
+                                Err(err) => error_message(format!("Schnellspeichern fehlgeschlagen: {err}")),
+                            }
+                        }
+                        _ => error_message("Kein gespeichertes Projekt zum Ueberschreiben. Erst 'Neue Version' anlegen.".to_string()),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::SaveProject { name, comment }) => {
+                    let mut state = state.project.lock().await;
+                    state.project.name = name.trim().to_string();
+                    let response = match save_project_version(&state.project, comment.as_deref()) {
+                        Ok(_) => projects_message(),
+                        Err(err) => error_message(format!("Could not save project: {err}")),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::LoadProject { id, version }) => {
+                    let mut state = state.project.lock().await;
+                    let response = match load_project_version(&id, version) {
+                        Ok(project) => {
+                            state.project = project;
+                            state.sketch_undo.clear();
+                            state.sketch_redo.clear();
+                            project_state_message(&state.project)
+                        }
+                        Err(err) => error_message(format!("Could not load project: {err}")),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                    let _ = socket.send(Message::Text(projects_message())).await;
+                }
+                Ok(ClientMessage::DeleteProject { id }) => {
+                    let response = match delete_project(&id) {
+                        Ok(_) => projects_message(),
+                        Err(err) => error_message(format!("Could not delete project: {err}")),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::ExportProject { id, version }) => {
+                    let state = state.project.lock().await;
+                    let response = match export_project(id.as_deref(), version, &state.project) {
+                        Ok((name, content)) => serde_json::json!({
+                            "type": "ProjectExport",
+                            "filename": name,
+                            "content": content,
+                        })
+                        .to_string(),
+                        Err(err) => error_message(format!("Could not export project: {err}")),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::ImportProject { name, content }) => {
+                    let response = match import_project(name.as_deref(), &content) {
+                        Ok(_) => projects_message(),
+                        Err(err) => error_message(format!("Could not import project: {err}")),
                     };
                     let _ = socket.send(Message::Text(response)).await;
                 }
@@ -810,10 +932,252 @@ fn set_dimension_constraint_value(constraint: &mut Constraint, value: f64) {
 fn project_state_message(project: &Project) -> String {
     serde_json::json!({
         "type": "Sketch",
+        "name": project.name,
         "sketch": project.sketch,
         "annotations": project.annotations,
     })
     .to_string()
+}
+
+fn error_message(message: String) -> String {
+    serde_json::json!({
+        "type": "Error",
+        "message": message,
+    })
+    .to_string()
+}
+
+fn projects_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../projects")
+}
+
+fn project_dir(id: &str) -> PathBuf {
+    projects_root().join(id)
+}
+
+fn version_dir(id: &str) -> PathBuf {
+    project_dir(id).join("versions")
+}
+
+fn version_path(id: &str, version: usize) -> PathBuf {
+    version_dir(id).join(format!("v{version:04}.thorcc"))
+}
+
+fn now_epoch_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
+}
+
+fn slugify(name: &str) -> String {
+    let slug: String = name
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let slug = slug
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        "untitled".to_string()
+    } else {
+        slug
+    }
+}
+
+fn read_thorcc(path: &Path) -> std::io::Result<ThorccFile> {
+    let content = fs::read_to_string(path)?;
+    serde_json::from_str::<ThorccFile>(&content)
+        .or_else(|_| {
+            serde_json::from_str::<Project>(&content).map(|project| ThorccFile {
+                format: "thorcc.project".to_string(),
+                file_version: 1,
+                saved_at: now_epoch_seconds(),
+                comment: None,
+                project,
+            })
+        })
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))
+}
+
+fn write_thorcc(path: &Path, project: &Project, comment: Option<&str>) -> std::io::Result<()> {
+    let file = ThorccFile {
+        format: "thorcc.project".to_string(),
+        file_version: 1,
+        saved_at: now_epoch_seconds(),
+        comment: comment
+            .map(str::trim)
+            .filter(|comment| !comment.is_empty())
+            .map(ToString::to_string),
+        project: project.clone(),
+    };
+    let content = serde_json::to_string_pretty(&file)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    fs::write(path, content)
+}
+
+fn project_versions(id: &str) -> std::io::Result<Vec<PathBuf>> {
+    let dir = version_dir(id);
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut paths = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|extension| extension == "thorcc"))
+        .collect::<Vec<_>>();
+    paths.sort();
+    Ok(paths)
+}
+
+fn list_projects() -> std::io::Result<Vec<ProjectEntry>> {
+    let root = projects_root();
+    fs::create_dir_all(&root)?;
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        let versions = project_versions(&id)?;
+        let Some(latest) = versions.last() else {
+            continue;
+        };
+        let file = read_thorcc(latest)?;
+        let version_entries = versions
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| {
+                read_thorcc(path).ok().map(|file| ProjectVersionEntry {
+                    version: index + 1,
+                    saved_at: file.saved_at,
+                    comment: file.comment,
+                    project: file.project,
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.push(ProjectEntry {
+            id,
+            name: file.project.name,
+            versions: versions.len(),
+            current_version: versions.len(),
+            updated_at: file.saved_at,
+            version_entries,
+        });
+    }
+    entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    Ok(entries)
+}
+
+fn projects_message() -> String {
+    match list_projects() {
+        Ok(projects) => serde_json::json!({
+            "type": "ProjectList",
+            "projects": projects,
+        })
+        .to_string(),
+        Err(err) => error_message(format!("Could not list projects: {err}")),
+    }
+}
+
+fn save_project_version(project: &Project, comment: Option<&str>) -> std::io::Result<ProjectEntry> {
+    let id = slugify(&project.name);
+    fs::create_dir_all(version_dir(&id))?;
+    let next_version = project_versions(&id)?.len() + 1;
+    write_thorcc(&version_path(&id, next_version), project, comment)?;
+    let version_entries = project_versions(&id)?
+        .iter()
+        .enumerate()
+        .filter_map(|(index, path)| {
+            read_thorcc(path).ok().map(|file| ProjectVersionEntry {
+                version: index + 1,
+                saved_at: file.saved_at,
+                comment: file.comment,
+                project: file.project,
+            })
+        })
+        .collect::<Vec<_>>();
+    Ok(ProjectEntry {
+        id,
+        name: project.name.clone(),
+        versions: next_version,
+        current_version: next_version,
+        updated_at: now_epoch_seconds(),
+        version_entries,
+    })
+}
+
+fn load_project_version(id: &str, version: Option<usize>) -> std::io::Result<Project> {
+    let versions = project_versions(id)?;
+    let version = version.unwrap_or(versions.len());
+    if version == 0 || version > versions.len() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "project version not found",
+        ));
+    }
+    Ok(read_thorcc(&version_path(id, version))?.project)
+}
+
+fn delete_project(id: &str) -> std::io::Result<()> {
+    let path = project_dir(id);
+    if path.exists() {
+        fs::remove_dir_all(path)?;
+    }
+    Ok(())
+}
+
+fn export_project(
+    id: Option<&str>,
+    version: Option<usize>,
+    current_project: &Project,
+) -> std::io::Result<(String, String)> {
+    if let Some(id) = id {
+        let version = version.unwrap_or(project_versions(id)?.len());
+        let path = version_path(id, version);
+        let content = fs::read_to_string(&path)?;
+        return Ok((format!("{id}-v{version:04}.thorcc"), content));
+    }
+
+    let file = ThorccFile {
+        format: "thorcc.project".to_string(),
+        file_version: 1,
+        saved_at: now_epoch_seconds(),
+        comment: Some("Exported current workspace".to_string()),
+        project: current_project.clone(),
+    };
+    let content = serde_json::to_string_pretty(&file)
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    Ok((format!("{}.thorcc", slugify(&current_project.name)), content))
+}
+
+fn import_project(name: Option<&str>, content: &str) -> std::io::Result<ProjectEntry> {
+    let file = serde_json::from_str::<ThorccFile>(content)
+        .or_else(|_| {
+            serde_json::from_str::<Project>(content).map(|project| ThorccFile {
+                format: "thorcc.project".to_string(),
+                file_version: 1,
+                saved_at: now_epoch_seconds(),
+                comment: None,
+                project,
+            })
+        })
+        .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+    let mut project = file.project;
+    if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+        project.name = name.trim().to_string();
+    }
+    save_project_version(&project, file.comment.as_deref())
 }
 
 impl DrawObject {

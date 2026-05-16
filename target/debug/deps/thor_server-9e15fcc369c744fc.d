@@ -4,3 +4,5 @@
 
 crates/thor_server/src/main.rs:
 crates/thor_server/src/project.rs:
+
+# env-dep:CARGO_MANIFEST_DIR=/home/moshy/Dokumente/Coding/ThorCC/crates/thor_server

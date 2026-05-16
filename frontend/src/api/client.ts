@@ -34,6 +34,28 @@ export type DimensionAnnotation = {
   offset: [number, number];
 };
 
+export type SavedProject = {
+  name: string;
+  sketch: Sketch;
+  annotations: DimensionAnnotation[];
+};
+
+export type ProjectVersionEntry = {
+  version: number;
+  saved_at: number;
+  comment?: string | null;
+  project: SavedProject;
+};
+
+export type ProjectEntry = {
+  id: string;
+  name: string;
+  versions: number;
+  current_version: number;
+  updated_at: number;
+  version_entries: ProjectVersionEntry[];
+};
+
 export type SketchConstraint =
   | { Horizontal: string }
   | { Vertical: string }
@@ -50,19 +72,29 @@ export type ClientMessage =
   | { type: 'DeleteSelection'; entities: string[]; dimensions: number[] }
   | { type: 'SketchUndo' }
   | { type: 'SketchRedo' }
+  | { type: 'ListProjects' }
+  | { type: 'QuickSaveProject' }
+  | { type: 'SaveProject'; name: string; comment?: string | null }
+  | { type: 'LoadProject'; id: string; version?: number | null }
+  | { type: 'DeleteProject'; id: string }
+  | { type: 'ExportProject'; id?: string | null; version?: number | null }
+  | { type: 'ImportProject'; name?: string | null; content: string }
   | { type: 'UpdatePoint'; id: string; x: number; y: number }
   | { type: 'UpdatePoints'; points: { id: string; x: number; y: number }[] }
   | { type: 'ExportGCode' };
 
 export type ServerMessage =
   | { type: 'GCode'; content: string }
-  | { type: 'Sketch'; sketch: Sketch; annotations?: DimensionAnnotation[] }
+  | { type: 'Sketch'; name?: string; sketch: Sketch; annotations?: DimensionAnnotation[] }
+  | { type: 'ProjectList'; projects: ProjectEntry[] }
+  | { type: 'ProjectExport'; filename: string; content: string }
   | { type: 'UpdateHistory'; items: string[] }
   | { type: 'Error'; message: string };
 
 export class ThorClient {
   private ws: WebSocket | null = null;
   private onMessageCallback: (msg: ServerMessage) => void = () => {};
+  private onOpenCallback: () => void = () => {};
 
   constructor(url: string) {
     // In dev mode, we might want to override the URL to point to the Rust server
@@ -79,10 +111,15 @@ export class ThorClient {
         console.error("Failed to parse message", e);
       }
     };
+    this.ws.onopen = () => this.onOpenCallback();
   }
 
   onMessage(callback: (msg: ServerMessage) => void) {
     this.onMessageCallback = callback;
+  }
+
+  onOpen(callback: () => void) {
+    this.onOpenCallback = callback;
   }
 
   send(msg: ClientMessage) {

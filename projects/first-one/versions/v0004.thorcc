@@ -1,0 +1,79 @@
+{
+  "format": "thorcc.project",
+  "file_version": 1,
+  "saved_at": 1778909444,
+  "comment": "test",
+  "project": {
+    "name": "first one",
+    "sketch": {
+      "entities": [
+        {
+          "Point": {
+            "id": "p0_0",
+            "pos": {
+              "x": -70.0,
+              "y": 80.0
+            }
+          }
+        },
+        {
+          "Point": {
+            "id": "p0_1",
+            "pos": {
+              "x": -30.0,
+              "y": 80.0
+            }
+          }
+        },
+        {
+          "Point": {
+            "id": "p0_2",
+            "pos": {
+              "x": -30.0,
+              "y": 50.0
+            }
+          }
+        },
+        {
+          "Point": {
+            "id": "p0_3",
+            "pos": {
+              "x": -70.0,
+              "y": 50.0
+            }
+          }
+        },
+        {
+          "Line": {
+            "id": "rect_0_0",
+            "p1": "p0_0",
+            "p2": "p0_1"
+          }
+        },
+        {
+          "Line": {
+            "id": "rect_0_1",
+            "p1": "p0_1",
+            "p2": "p0_2"
+          }
+        },
+        {
+          "Line": {
+            "id": "rect_0_2",
+            "p1": "p0_2",
+            "p2": "p0_3"
+          }
+        },
+        {
+          "Line": {
+            "id": "rect_0_close",
+            "p1": "p0_3",
+            "p2": "p0_0"
+          }
+        }
+      ],
+      "constraints": []
+    },
+    "annotations": []
+  }
+}
