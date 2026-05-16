@@ -273,9 +273,8 @@ fn apply_constraint(sketch: &mut Sketch, constraint: &Constraint) -> f64 {
         Constraint::Angle(first, second, value) => {
             apply_line_to_line_angle(sketch, first, second, *value)
         }
-        Constraint::Parallel(_, _)
-        | Constraint::Perpendicular(_, _)
-        | Constraint::EqualLength(_, _) => 0.0,
+        Constraint::EqualLength(first, second) => apply_equal_length(sketch, first, second),
+        Constraint::Parallel(_, _) | Constraint::Perpendicular(_, _) => 0.0,
     }
 }
 
@@ -355,6 +354,52 @@ fn apply_line_length(sketch: &mut Sketch, line: &str, value: f64) -> f64 {
         return 0.0;
     };
     apply_point_distance(sketch, &p1, &p2, value)
+}
+
+fn apply_equal_length(sketch: &mut Sketch, first: &str, second: &str) -> f64 {
+    let Some((first_p1, first_p2)) = sketch.line_points(first) else {
+        return 0.0;
+    };
+    let Some((second_p1, second_p2)) = sketch.line_points(second) else {
+        return 0.0;
+    };
+    let Some(first_start) = sketch.point(&first_p1) else {
+        return 0.0;
+    };
+    let Some(first_end) = sketch.point(&first_p2) else {
+        return 0.0;
+    };
+    let Some(second_start) = sketch.point(&second_p1) else {
+        return 0.0;
+    };
+    let Some(second_end) = sketch.point(&second_p2) else {
+        return 0.0;
+    };
+
+    let first_length = (first_end - first_start).hypot();
+    let second_length = (second_end - second_start).hypot();
+    if first_length <= f64::EPSILON || second_length <= f64::EPSILON {
+        return 0.0;
+    }
+
+    if let Some(target) = explicit_line_length(sketch, first) {
+        return apply_line_length(sketch, second, target);
+    }
+    if let Some(target) = explicit_line_length(sketch, second) {
+        return apply_line_length(sketch, first, target);
+    }
+
+    apply_line_length(sketch, second, first_length)
+}
+
+fn explicit_line_length(sketch: &Sketch, line: &str) -> Option<f64> {
+    sketch.constraints.iter().find_map(|constraint| match constraint {
+        Constraint::Length {
+            line: constrained_line,
+            value,
+        } if constrained_line == line => Some(*value),
+        _ => None,
+    })
 }
 
 fn apply_line_angle(sketch: &mut Sketch, line: &str, value: f64) -> f64 {
@@ -590,6 +635,34 @@ mod tests {
             _ => None,
         });
         assert_eq!(radius, Some(7.0));
+    }
+
+    #[test]
+    fn equal_length_follows_explicit_length_dimension() {
+        let mut sketch = Sketch {
+            entities: vec![
+                point("a1", 0.0, 0.0),
+                point("a2", 10.0, 0.0),
+                point("b1", 0.0, 10.0),
+                point("b2", 30.0, 10.0),
+                line("measured", "a1", "a2"),
+                line("follower", "b1", "b2"),
+            ],
+            constraints: vec![
+                Constraint::Length {
+                    line: "measured".to_string(),
+                    value: 90.0,
+                },
+                Constraint::EqualLength("measured".to_string(), "follower".to_string()),
+            ],
+        };
+
+        Solver::new().solve(&mut sketch);
+
+        let follower_start = sketch.point("b1").unwrap();
+        let follower_end = sketch.point("b2").unwrap();
+        let follower_length = (follower_end - follower_start).hypot();
+        assert!((follower_length - 90.0).abs() < 1e-6);
     }
 
     #[test]

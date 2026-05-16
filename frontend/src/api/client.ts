@@ -45,7 +45,13 @@ export type ClientMessage =
   | { type: 'AddObject'; object: DrawObject }
   | { type: 'AddConstraint'; constraint: SketchConstraint }
   | { type: 'AddDimension'; target: DimensionTarget; value: number; offset?: [number, number] }
+  | { type: 'UpdateDimensionValue'; index: number; value: number }
+  | { type: 'UpdateDimensionOffset'; index: number; offset: [number, number] }
+  | { type: 'DeleteSelection'; entities: string[]; dimensions: number[] }
+  | { type: 'SketchUndo' }
+  | { type: 'SketchRedo' }
   | { type: 'UpdatePoint'; id: string; x: number; y: number }
+  | { type: 'UpdatePoints'; points: { id: string; x: number; y: number }[] }
   | { type: 'ExportGCode' };
 
 export type ServerMessage =
@@ -87,6 +93,10 @@ export class ThorClient {
 
   updatePoint(id: string, x: number, y: number) {
     this.send({ type: 'UpdatePoint', id, x, y });
+  }
+
+  updatePoints(points: { id: string; x: number; y: number }[]) {
+    this.send({ type: 'UpdatePoints', points });
   }
 
   generateToolpath() {

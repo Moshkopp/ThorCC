@@ -10,42 +10,42 @@ body {
   margin: 0;
   padding: 0;
   overflow: hidden;
-  background-color: #0a0a0a;
-  color: #e5e5e5;
+  background-color: #090c0d;
+  color: #d7dcdd;
   font-family: 'Inter', sans-serif;
 }
 
 .thor-dimension-input {
   position: absolute;
   z-index: 30;
-  width: 84px;
+  width: 104px;
   transform: translate(-50%, -50%);
-  border: 1px solid rgba(0, 170, 255, 0.95);
+  border: 1px solid rgba(114, 196, 206, 0.9);
   border-radius: 4px;
-  background: rgba(10, 10, 10, 0.95);
-  color: #e5e5e5;
-  font-size: 12px;
+  background: rgba(12, 16, 17, 0.96);
+  color: #d7dcdd;
+  font-size: 14px;
   font-weight: 700;
   outline: none;
-  padding: 5px 7px;
+  padding: 7px 9px;
   text-align: center;
-  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.08), 0 8px 24px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.28);
 }
 
 .thor-dimension-input:focus {
-  border-color: #ffcc00;
+  border-color: #d99a38;
 }
 
 .thor-selection-box {
   position: absolute;
   z-index: 25;
   pointer-events: none;
-  border: 1px solid rgba(0, 220, 120, 0.95);
-  background: rgba(0, 220, 120, 0.12);
+  border: 1px solid rgba(123, 191, 139, 0.95);
+  background: rgba(123, 191, 139, 0.14);
 }
 
 .thor-selection-box[data-mode="crossing"] {
-  border-color: rgba(0, 170, 255, 0.95);
+  border-color: rgba(114, 196, 206, 0.95);
   border-style: dashed;
-  background: rgba(0, 170, 255, 0.1);
+  background: rgba(114, 196, 206, 0.12);
 }

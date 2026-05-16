@@ -10,6 +10,7 @@ use axum::{
 use axum_embed::ServeEmbed;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -40,12 +41,36 @@ enum ClientMessage {
         value: f64,
         offset: Option<[f64; 2]>,
     },
+    UpdateDimensionOffset {
+        index: usize,
+        offset: [f64; 2],
+    },
+    UpdateDimensionValue {
+        index: usize,
+        value: f64,
+    },
+    DeleteSelection {
+        entities: Vec<String>,
+        dimensions: Vec<usize>,
+    },
+    SketchUndo,
+    SketchRedo,
     UpdatePoint {
         id: String,
         x: f64,
         y: f64,
     },
+    UpdatePoints {
+        points: Vec<PointUpdate>,
+    },
     ExportGCode,
+}
+
+#[derive(Debug, Deserialize)]
+struct PointUpdate {
+    id: String,
+    x: f64,
+    y: f64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -95,13 +120,29 @@ enum DrawObject {
 struct Assets;
 
 struct AppState {
-    project: Mutex<Project>,
+    project: Mutex<ProjectState>,
+}
+
+#[derive(Clone)]
+struct SketchSnapshot {
+    sketch: thor_geom::sketcher::Sketch,
+    annotations: Vec<DimensionAnnotation>,
+}
+
+struct ProjectState {
+    project: Project,
+    sketch_undo: Vec<SketchSnapshot>,
+    sketch_redo: Vec<SketchSnapshot>,
 }
 
 #[tokio::main]
 async fn main() {
     let state = Arc::new(AppState {
-        project: Mutex::new(Project::new("Default Project")),
+        project: Mutex::new(ProjectState {
+            project: Project::new("Default Project"),
+            sketch_undo: Vec::new(),
+            sketch_redo: Vec::new(),
+        }),
     });
 
     let serve_assets = ServeEmbed::<Assets>::new();
@@ -131,9 +172,9 @@ async fn ws_handler(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) ->
 
 async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
     {
-        let project = state.project.lock().await;
+        let state = state.project.lock().await;
         let _ = socket
-            .send(Message::Text(project_state_message(&project)))
+            .send(Message::Text(project_state_message(&state.project)))
             .await;
     }
 
@@ -143,19 +184,21 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
             match parsed {
                 Ok(ClientMessage::AddObject { object }) => {
-                    let mut project = state.project.lock().await;
+                    let mut state = state.project.lock().await;
                     let label = object.label();
-                    add_object_to_project(&mut project, object);
-                    let response = project_state_message(&project);
+                    push_sketch_undo(&mut state);
+                    add_object_to_project(&mut state.project, object);
+                    let response = project_state_message(&state.project);
                     println!("Added {}", label);
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::AddConstraint { constraint }) => {
-                    let mut project = state.project.lock().await;
-                    project.sketch.constraints.push(constraint);
+                    let mut state = state.project.lock().await;
+                    push_sketch_undo(&mut state);
+                    state.project.sketch.constraints.push(constraint);
                     let solver = Solver::new();
-                    solver.solve(&mut project.sketch);
-                    let response = project_state_message(&project);
+                    solver.solve(&mut state.project.sketch);
+                    let response = project_state_message(&state.project);
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::AddDimension {
@@ -163,19 +206,21 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     value,
                     offset,
                 }) => {
-                    let mut project = state.project.lock().await;
-                    let response = match project.sketch.add_dimension(target.clone(), value) {
+                    let mut state = state.project.lock().await;
+                    let before = sketch_snapshot(&state.project);
+                    let response = match state.project.sketch.add_dimension(target.clone(), value) {
                         Ok(()) => {
                             if let Some(offset) = offset {
-                                project.annotations.push(DimensionAnnotation {
+                                state.project.annotations.push(DimensionAnnotation {
                                     target,
                                     value,
                                     offset,
                                 });
                             }
+                            commit_sketch_undo(&mut state, before);
                             let solver = Solver::new();
-                            solver.solve(&mut project.sketch);
-                            project_state_message(&project)
+                            solver.solve(&mut state.project.sketch);
+                            project_state_message(&state.project)
                         }
                         Err(err) => serde_json::json!({
                             "type": "Error",
@@ -185,28 +230,96 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                     };
                     let _ = socket.send(Message::Text(response)).await;
                 }
-                Ok(ClientMessage::UpdatePoint { id, x, y }) => {
-                    let mut project = state.project.lock().await;
-
-                    for entity in project.sketch.entities.iter_mut() {
-                        if let Entity::Point { id: p_id, pos } = entity {
-                            if p_id == &id {
-                                pos.x = x;
-                                pos.y = y;
-                                break;
-                            }
+                Ok(ClientMessage::UpdateDimensionOffset { index, offset }) => {
+                    let mut state = state.project.lock().await;
+                    let before = sketch_snapshot(&state.project);
+                    let response = match state.project.annotations.get_mut(index) {
+                        Some(annotation) => {
+                            annotation.offset = offset;
+                            commit_sketch_undo(&mut state, before);
+                            project_state_message(&state.project)
                         }
-                    }
+                        None => serde_json::json!({
+                            "type": "Error",
+                            "message": format!("Invalid dimension annotation index: {}", index)
+                        })
+                        .to_string(),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::UpdateDimensionValue { index, value }) => {
+                    let mut state = state.project.lock().await;
+                    let before = sketch_snapshot(&state.project);
+                    let response = match update_dimension_value(&mut state.project, index, value) {
+                        Ok(()) => {
+                            commit_sketch_undo(&mut state, before);
+                            let solver = Solver::new();
+                            solver.solve(&mut state.project.sketch);
+                            project_state_message(&state.project)
+                        }
+                        Err(message) => serde_json::json!({
+                            "type": "Error",
+                            "message": message,
+                        })
+                        .to_string(),
+                    };
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::DeleteSelection {
+                    entities,
+                    dimensions,
+                }) => {
+                    let mut state = state.project.lock().await;
+                    push_sketch_undo(&mut state);
+                    delete_selection(&mut state.project, &entities, &dimensions);
+                    let solver = Solver::new();
+                    solver.solve(&mut state.project.sketch);
+                    let response = project_state_message(&state.project);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::SketchUndo) => {
+                    let mut state = state.project.lock().await;
+                    sketch_undo(&mut state);
+                    let response = project_state_message(&state.project);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::SketchRedo) => {
+                    let mut state = state.project.lock().await;
+                    sketch_redo(&mut state);
+                    let response = project_state_message(&state.project);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::UpdatePoint { id, x, y }) => {
+                    let mut state = state.project.lock().await;
+
+                    push_sketch_undo(&mut state);
+                    update_project_points(
+                        &mut state.project,
+                        vec![PointUpdate { id, x, y }],
+                    );
 
                     let solver = Solver::new();
-                    solver.solve(&mut project.sketch);
+                    solver.solve(&mut state.project.sketch);
 
-                    let response = project_state_message(&project);
-                    drop(project);
+                    let response = project_state_message(&state.project);
+                    drop(state);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::UpdatePoints { points }) => {
+                    let mut state = state.project.lock().await;
+
+                    push_sketch_undo(&mut state);
+                    update_project_points(&mut state.project, points);
+
+                    let solver = Solver::new();
+                    solver.solve(&mut state.project.sketch);
+
+                    let response = project_state_message(&state.project);
+                    drop(state);
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::ExportGCode) => {
-                    let project = state.project.lock().await;
+                    let state = state.project.lock().await;
                     let tool = Tool { diameter: 6.0 };
                     let op = CamOperation {
                         id: "op1".to_string(),
@@ -217,7 +330,7 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
                         target_depth: -5.0,
                     };
 
-                    let contours = sketch_contours(&project);
+                    let contours = sketch_contours(&state.project);
                     let mut points = Vec::new();
                     for contour in contours {
                         let toolpath = generate_profile(&op, &tool, &contour);
@@ -256,6 +369,425 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
         } else {
             break;
         }
+    }
+}
+
+fn sketch_snapshot(project: &Project) -> SketchSnapshot {
+    SketchSnapshot {
+        sketch: project.sketch.clone(),
+        annotations: project.annotations.clone(),
+    }
+}
+
+fn restore_sketch_snapshot(project: &mut Project, snapshot: SketchSnapshot) {
+    project.sketch = snapshot.sketch;
+    project.annotations = snapshot.annotations;
+}
+
+fn commit_sketch_undo(state: &mut ProjectState, snapshot: SketchSnapshot) {
+    state.sketch_undo.push(snapshot);
+    if state.sketch_undo.len() > 100 {
+        state.sketch_undo.remove(0);
+    }
+    state.sketch_redo.clear();
+}
+
+fn push_sketch_undo(state: &mut ProjectState) {
+    let snapshot = sketch_snapshot(&state.project);
+    commit_sketch_undo(state, snapshot);
+}
+
+fn sketch_undo(state: &mut ProjectState) {
+    let Some(previous) = state.sketch_undo.pop() else {
+        return;
+    };
+    let current = sketch_snapshot(&state.project);
+    state.sketch_redo.push(current);
+    restore_sketch_snapshot(&mut state.project, previous);
+}
+
+fn sketch_redo(state: &mut ProjectState) {
+    let Some(next) = state.sketch_redo.pop() else {
+        return;
+    };
+    let current = sketch_snapshot(&state.project);
+    state.sketch_undo.push(current);
+    restore_sketch_snapshot(&mut state.project, next);
+}
+
+fn update_dimension_value(project: &mut Project, index: usize, value: f64) -> Result<(), String> {
+    let Some(annotation) = project.annotations.get_mut(index) else {
+        return Err(format!("Invalid dimension annotation index: {index}"));
+    };
+
+    let target = annotation.target.clone();
+    let old_value = annotation.value;
+    annotation.value = value;
+
+    if let Some(constraint) = project
+        .sketch
+        .constraints
+        .iter_mut()
+        .find(|constraint| dimension_constraint_matches(constraint, &target, old_value))
+    {
+        set_dimension_constraint_value(constraint, value);
+    } else if let Ok(constraint) = project.sketch.dimension_constraint(target, value) {
+        project.sketch.constraints.push(constraint);
+    }
+
+    Ok(())
+}
+
+fn delete_selection(project: &mut Project, entities: &[String], dimensions: &[usize]) {
+    let mut dimensions_to_delete: HashSet<usize> = dimensions.iter().copied().collect();
+    let entity_ids: HashSet<String> = entities.iter().cloned().collect();
+    let point_ids = points_for_entities(&project.sketch.entities, &entity_ids);
+
+    for (index, annotation) in project.annotations.iter().enumerate() {
+        let target_points = dimension_point_ids(&project.sketch.entities, &annotation.target);
+        if target_entity_ids(&annotation.target)
+            .iter()
+            .any(|id| entity_ids.contains(id))
+            || target_points.iter().any(|id| point_ids.contains(id))
+        {
+            dimensions_to_delete.insert(index);
+        }
+    }
+
+    for index in dimensions_to_delete.iter().copied() {
+        if let Some(annotation) = project.annotations.get(index) {
+            let target = annotation.target.clone();
+            let value = annotation.value;
+            project
+                .sketch
+                .constraints
+                .retain(|constraint| !dimension_constraint_matches(constraint, &target, value));
+        }
+    }
+
+    project.annotations = project
+        .annotations
+        .iter()
+        .cloned()
+        .enumerate()
+        .filter_map(|(index, annotation)| (!dimensions_to_delete.contains(&index)).then_some(annotation))
+        .collect();
+
+    project.sketch.constraints.retain(|constraint| {
+        !constraint_references_entities(constraint, &entity_ids)
+            && !constraint_references_points(constraint, &point_ids)
+    });
+
+    project.sketch.entities.retain(|entity| match entity {
+        Entity::Line { id, .. } | Entity::Circle { id, .. } | Entity::Arc { id, .. } => {
+            !entity_ids.contains(id)
+        }
+        Entity::Point { id, .. } => !point_ids.contains(id),
+    });
+}
+
+fn update_project_points(project: &mut Project, updates: Vec<PointUpdate>) {
+    let mut deltas = HashMap::new();
+
+    for update in &updates {
+        if let Some(current) = find_point(project, &update.id) {
+            deltas.insert(
+                update.id.clone(),
+                [update.x - current.x, update.y - current.y],
+            );
+        }
+    }
+
+    for update in updates {
+        for entity in project.sketch.entities.iter_mut() {
+            if let Entity::Point { id, pos } = entity {
+                if id == &update.id {
+                    pos.x = update.x;
+                    pos.y = update.y;
+                    break;
+                }
+            }
+        }
+    }
+
+    shift_dimension_annotations(project, &deltas);
+}
+
+fn shift_dimension_annotations(
+    project: &mut Project,
+    deltas: &std::collections::HashMap<String, [f64; 2]>,
+) {
+    if deltas.is_empty() {
+        return;
+    }
+
+    let entities = project.sketch.entities.clone();
+    for annotation in &mut project.annotations {
+        let point_ids = dimension_point_ids(&entities, &annotation.target);
+        let shifted: Vec<[f64; 2]> = point_ids
+            .iter()
+            .filter_map(|id| deltas.get(id).copied())
+            .collect();
+
+        if shifted.is_empty() {
+            continue;
+        }
+
+        let count = shifted.len() as f64;
+        annotation.offset[0] += shifted.iter().map(|delta| delta[0]).sum::<f64>() / count;
+        annotation.offset[1] += shifted.iter().map(|delta| delta[1]).sum::<f64>() / count;
+    }
+}
+
+fn dimension_point_ids(entities: &[Entity], target: &DimensionTarget) -> Vec<String> {
+    match target {
+        DimensionTarget::HorizontalDistance { first, second }
+        | DimensionTarget::VerticalDistance { first, second } => {
+            let mut ids = vec![first.clone()];
+            if let Some(second) = second {
+                ids.push(second.clone());
+            }
+            ids
+        }
+        DimensionTarget::PointDistance { first, second } => vec![first.clone(), second.clone()],
+        DimensionTarget::LineLength { line } | DimensionTarget::LineAngle { line } => {
+            line_points(entities, line)
+        }
+        DimensionTarget::CircleRadius { circle } | DimensionTarget::CircleDiameter { circle } => {
+            circle_points(entities, circle)
+        }
+        DimensionTarget::LineToLineAngle { first, second } => {
+            let mut ids = line_points(entities, first);
+            ids.extend(line_points(entities, second));
+            ids
+        }
+    }
+}
+
+fn line_points(entities: &[Entity], line_id: &str) -> Vec<String> {
+    entities
+        .iter()
+        .find_map(|entity| match entity {
+            Entity::Line { id, p1, p2 } if id == line_id => Some(vec![p1.clone(), p2.clone()]),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn circle_points(entities: &[Entity], circle_id: &str) -> Vec<String> {
+    entities
+        .iter()
+        .find_map(|entity| match entity {
+            Entity::Circle { id, center, .. } if id == circle_id => Some(vec![center.clone()]),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+fn points_for_entities(entities: &[Entity], entity_ids: &HashSet<String>) -> HashSet<String> {
+    let mut points = HashSet::new();
+    for entity in entities {
+        match entity {
+            Entity::Line { id, p1, p2 } if entity_ids.contains(id) => {
+                points.insert(p1.clone());
+                points.insert(p2.clone());
+            }
+            Entity::Circle { id, center, .. } if entity_ids.contains(id) => {
+                points.insert(center.clone());
+            }
+            Entity::Arc {
+                id,
+                center,
+                start,
+                end,
+            } if entity_ids.contains(id) => {
+                points.insert(center.clone());
+                points.insert(start.clone());
+                points.insert(end.clone());
+            }
+            _ => {}
+        }
+    }
+    points
+}
+
+fn target_entity_ids(target: &DimensionTarget) -> Vec<String> {
+    match target {
+        DimensionTarget::LineLength { line } | DimensionTarget::LineAngle { line } => {
+            vec![line.clone()]
+        }
+        DimensionTarget::CircleRadius { circle } | DimensionTarget::CircleDiameter { circle } => {
+            vec![circle.clone()]
+        }
+        DimensionTarget::LineToLineAngle { first, second } => vec![first.clone(), second.clone()],
+        DimensionTarget::HorizontalDistance { .. }
+        | DimensionTarget::VerticalDistance { .. }
+        | DimensionTarget::PointDistance { .. } => Vec::new(),
+    }
+}
+
+fn constraint_references_entities(constraint: &Constraint, entity_ids: &HashSet<String>) -> bool {
+    match constraint {
+        Constraint::Horizontal(line)
+        | Constraint::Vertical(line)
+        | Constraint::Length { line, .. }
+        | Constraint::LineAngle { line, .. } => entity_ids.contains(line),
+        Constraint::Parallel(first, second)
+        | Constraint::Perpendicular(first, second)
+        | Constraint::EqualLength(first, second)
+        | Constraint::Angle(first, second, _) => {
+            entity_ids.contains(first) || entity_ids.contains(second)
+        }
+        Constraint::Radius { circle, .. } | Constraint::Diameter { circle, .. } => {
+            entity_ids.contains(circle)
+        }
+        Constraint::Coincident(_, _)
+        | Constraint::Distance(_, _, _)
+        | Constraint::DistanceX { .. }
+        | Constraint::DistanceY { .. } => false,
+    }
+}
+
+fn constraint_references_points(constraint: &Constraint, point_ids: &HashSet<String>) -> bool {
+    match constraint {
+        Constraint::Coincident(first, second) | Constraint::Distance(first, second, _) => {
+            point_ids.contains(first) || point_ids.contains(second)
+        }
+        Constraint::DistanceX { first, second, .. }
+        | Constraint::DistanceY { first, second, .. } => {
+            point_ids.contains(first) || second.as_ref().is_some_and(|id| point_ids.contains(id))
+        }
+        Constraint::Horizontal(_)
+        | Constraint::Vertical(_)
+        | Constraint::Parallel(_, _)
+        | Constraint::Perpendicular(_, _)
+        | Constraint::EqualLength(_, _)
+        | Constraint::Length { .. }
+        | Constraint::Radius { .. }
+        | Constraint::Diameter { .. }
+        | Constraint::Angle(_, _, _)
+        | Constraint::LineAngle { .. } => false,
+    }
+}
+
+fn dimension_constraint_matches(
+    constraint: &Constraint,
+    target: &DimensionTarget,
+    value: f64,
+) -> bool {
+    const EPSILON: f64 = 1e-6;
+    match (constraint, target) {
+        (
+            Constraint::DistanceX {
+                first,
+                second,
+                value: constraint_value,
+            },
+            DimensionTarget::HorizontalDistance {
+                first: target_first,
+                second: target_second,
+            },
+        )
+        | (
+            Constraint::DistanceY {
+                first,
+                second,
+                value: constraint_value,
+            },
+            DimensionTarget::VerticalDistance {
+                first: target_first,
+                second: target_second,
+            },
+        ) => {
+            first == target_first
+                && second == target_second
+                && (*constraint_value - value).abs() <= EPSILON
+        }
+        (Constraint::Distance(first, second, constraint_value), DimensionTarget::PointDistance {
+            first: target_first,
+            second: target_second,
+        }) => {
+            first == target_first
+                && second == target_second
+                && (*constraint_value - value).abs() <= EPSILON
+        }
+        (Constraint::Length { line, value: constraint_value }, DimensionTarget::LineLength {
+            line: target_line,
+        }) => line == target_line && (*constraint_value - value).abs() <= EPSILON,
+        (
+            Constraint::Radius {
+                circle,
+                value: constraint_value,
+            },
+            DimensionTarget::CircleRadius {
+                circle: target_circle,
+            },
+        )
+        | (
+            Constraint::Diameter {
+                circle,
+                value: constraint_value,
+            },
+            DimensionTarget::CircleDiameter {
+                circle: target_circle,
+            },
+        ) => circle == target_circle && (*constraint_value - value).abs() <= EPSILON,
+        (
+            Constraint::LineAngle {
+                line,
+                value: constraint_value,
+            },
+            DimensionTarget::LineAngle { line: target_line },
+        ) => line == target_line && (*constraint_value - value).abs() <= EPSILON,
+        (
+            Constraint::Angle(first, second, constraint_value),
+            DimensionTarget::LineToLineAngle {
+                first: target_first,
+                second: target_second,
+            },
+        ) => {
+            first == target_first
+                && second == target_second
+                && (*constraint_value - value).abs() <= EPSILON
+        }
+        _ => false,
+    }
+}
+
+fn set_dimension_constraint_value(constraint: &mut Constraint, value: f64) {
+    match constraint {
+        Constraint::Distance(_, _, constraint_value)
+        | Constraint::DistanceX {
+            value: constraint_value,
+            ..
+        }
+        | Constraint::DistanceY {
+            value: constraint_value,
+            ..
+        }
+        | Constraint::Length {
+            value: constraint_value,
+            ..
+        }
+        | Constraint::Radius {
+            value: constraint_value,
+            ..
+        }
+        | Constraint::Diameter {
+            value: constraint_value,
+            ..
+        }
+        | Constraint::Angle(_, _, constraint_value)
+        | Constraint::LineAngle {
+            value: constraint_value,
+            ..
+        } => *constraint_value = value,
+        Constraint::Horizontal(_)
+        | Constraint::Vertical(_)
+        | Constraint::Parallel(_, _)
+        | Constraint::Perpendicular(_, _)
+        | Constraint::EqualLength(_, _)
+        | Constraint::Coincident(_, _) => {}
     }
 }
 
