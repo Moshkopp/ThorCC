@@ -2,7 +2,7 @@ export type DrawObject =
   | { type: 'Line'; p1: [number, number]; p2: [number, number] }
   | { type: 'Circle'; center: [number, number]; radius: number }
   | { type: 'Rect'; x: number; y: number; w: number; h: number }
-  | { type: 'TRIANGLE' | 'HEXAGON' | 'OCTAGON'; center: [number, number]; radius: number }
+  | { type: 'TRIANGLE' | 'PENTAGON' | 'HEXAGON' | 'OCTAGON'; center: [number, number]; radius: number }
   | { type: 'POLYLINE' | 'SPLINE'; points: [number, number][] };
 
 export type SketchPoint = { x: number; y: number } | [number, number];
@@ -81,6 +81,7 @@ export type ClientMessage =
   | { type: 'ImportProject'; name?: string | null; content: string }
   | { type: 'UpdatePoint'; id: string; x: number; y: number }
   | { type: 'UpdatePoints'; points: { id: string; x: number; y: number }[] }
+  | { type: 'UpdateCircleRadius'; id: string; radius: number }
   | { type: 'ExportGCode' };
 
 export type ServerMessage =

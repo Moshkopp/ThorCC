@@ -87,6 +87,10 @@ enum ClientMessage {
     UpdatePoints {
         points: Vec<PointUpdate>,
     },
+    UpdateCircleRadius {
+        id: String,
+        radius: f64,
+    },
     ExportGCode,
 }
 
@@ -144,6 +148,11 @@ enum DrawObject {
     },
     #[serde(rename = "TRIANGLE")]
     Triangle {
+        center: [f64; 2],
+        radius: f64,
+    },
+    #[serde(rename = "PENTAGON")]
+    Pentagon {
         center: [f64; 2],
         radius: f64,
     },
@@ -452,6 +461,25 @@ async fn handle_socket(mut socket: WebSocket, state: Arc<AppState>) {
 
                     let response = project_state_message(&state.project);
                     drop(state);
+                    let _ = socket.send(Message::Text(response)).await;
+                }
+                Ok(ClientMessage::UpdateCircleRadius { id, radius }) => {
+                    let mut state = state.project.lock().await;
+                    push_sketch_undo(&mut state);
+                    let found = state.project.sketch.entities.iter_mut().find_map(|entity| {
+                        if let Entity::Circle { id: eid, radius: r, .. } = entity {
+                            if eid == &id { return Some(r); }
+                        }
+                        None
+                    });
+                    let response = if let Some(r) = found {
+                        *r = radius.abs();
+                        let solver = Solver::new();
+                        solver.solve(&mut state.project.sketch);
+                        project_state_message(&state.project)
+                    } else {
+                        error_message(format!("Circle '{id}' not found"))
+                    };
                     let _ = socket.send(Message::Text(response)).await;
                 }
                 Ok(ClientMessage::ExportGCode) => {
@@ -1187,6 +1215,7 @@ impl DrawObject {
             DrawObject::Circle { .. } => "Circle",
             DrawObject::Rect { .. } => "Rect",
             DrawObject::Triangle { .. } => "Triangle",
+            DrawObject::Pentagon { .. } => "Pentagon",
             DrawObject::Hexagon { .. } => "Hexagon",
             DrawObject::Octagon { .. } => "Octagon",
             DrawObject::Polyline { .. } => "Polyline",
@@ -1227,6 +1256,9 @@ fn add_object_to_project(project: &mut Project, object: DrawObject) {
         }
         DrawObject::Triangle { center, radius } => {
             add_regular_polygon(project, object_index, "triangle", center, radius, 3)
+        }
+        DrawObject::Pentagon { center, radius } => {
+            add_regular_polygon(project, object_index, "pentagon", center, radius, 5)
         }
         DrawObject::Hexagon { center, radius } => {
             add_regular_polygon(project, object_index, "hexagon", center, radius, 6)

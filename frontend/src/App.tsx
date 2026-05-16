@@ -9,7 +9,6 @@ const App: Component = () => {
   const [status, setStatus] = createSignal("Ready");
   const [activeTool, setActiveTool] = createSignal<string | null>('select');
   const [toolActionVersion, setToolActionVersion] = createSignal(0);
-  const [history, setHistory] = createSignal<string[]>([]);
   const [sketch, setSketch] = createSignal<Sketch | null>(null);
   const [annotations, setAnnotations] = createSignal<DimensionAnnotation[]>([]);
   const [projectBarOpen, setProjectBarOpen] = createSignal(false);
@@ -23,6 +22,8 @@ const App: Component = () => {
   const [selectedProject, setSelectedProject] = createSignal<ProjectEntry | null>(null);
   const [isDirty, setIsDirty] = createSignal(false);
   const [currentProjectName, setCurrentProjectName] = createSignal<string | null>(null);
+  const [projectSaved, setProjectSaved] = createSignal(false);
+  const [polygonSides, setPolygonSides] = createSignal<5 | 6 | 8>(6);
 
   let client: ThorClient | undefined;
   let importInputRef: HTMLInputElement | undefined;
@@ -35,19 +36,11 @@ const App: Component = () => {
         setGCode(msg.content);
         setStatus("G-Code Generated");
       }
-      if (msg.type === 'UpdateHistory') {
-        setHistory(msg.items);
-      }
       if (msg.type === 'Sketch') {
         if (msg.name) setCurrentProjectName(msg.name);
         setSketch(msg.sketch);
         setAnnotations(msg.annotations ?? []);
         setStatus("Sketch Updated");
-        setHistory([
-          `${msg.sketch.entities.length} entities in sketch`,
-          `${msg.sketch.constraints.length} constraints in sketch`,
-          `${(msg.annotations ?? []).length} dimensions in sketch`,
-        ]);
       }
       if (msg.type === 'ProjectList') {
         setProjects(msg.projects);
@@ -72,7 +65,7 @@ const App: Component = () => {
 
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
         event.preventDefault();
-        quickSave();
+        if (projectSaved()) quickSave(); else openSaveModal();
         return;
       }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'z') {
@@ -83,6 +76,12 @@ const App: Component = () => {
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'y') {
         event.preventDefault();
         handleSketchRedo();
+        return;
+      }
+      if (event.key.toLowerCase() === 'm' && activeTool() === 'polygon') {
+        setPolygonSides(s => s === 5 ? 6 : s === 6 ? 8 : 5);
+        const sides = polygonSides();
+        setStatus(`POLYGON: ${sides}-Eck`);
         return;
       }
       if (event.key !== 'Escape') return;
@@ -193,6 +192,7 @@ const App: Component = () => {
     if (!name) { setStatus('Projektname erforderlich'); return; }
     client?.send({ type: 'SaveProject', name, comment: saveComment() });
     setCurrentProjectName(name);
+    setProjectSaved(true);
     setIsDirty(false);
     setSaveModalOpen(false);
     setProjectBarOpen(true);
@@ -202,6 +202,7 @@ const App: Component = () => {
   const loadProject = (project: ProjectEntry, version = project.current_version) => {
     client?.send({ type: 'LoadProject', id: project.id, version });
     setCurrentProjectName(project.name);
+    setProjectSaved(true);
     setIsDirty(false);
     setSelectedProject(null);
     setHoveredVersion(null);
@@ -257,6 +258,7 @@ const App: Component = () => {
     setActiveTool(tool);
     setToolActionVersion(v => v + 1);
     if (tool === 'select') setStatus("SELECT: Geometrie anklicken");
+    else if (tool === 'polygon') setStatus(`POLYGON: ${polygonSides()}-Eck — M zum Wechseln`);
     else if (['horiz','vert','parallel','coincident','equal','dimension','radius','diameter','angle'].includes(tool))
       setStatus(`${tool.toUpperCase()}: Geometrie anklicken`);
     else setStatus(`${tool.toUpperCase()}: Start- und Endpunkt setzen`);
@@ -266,7 +268,6 @@ const App: Component = () => {
     if (client) {
       client.send({ type: 'AddObject', object: obj });
       setIsDirty(true);
-      setHistory(prev => [`${obj.type} hinzugefügt`, ...prev]);
       setActiveTool('select');
       setStatus("SELECT: bereit");
     }
@@ -275,58 +276,55 @@ const App: Component = () => {
   const onDimensionAdded = (target: DimensionTarget, value: number, offset?: [number, number]) => {
     client?.send({ type: 'AddDimension', target, value, offset });
     setIsDirty(true);
-    setHistory(prev => [`Maß ${value.toFixed(2)} hinzugefügt`, ...prev]);
   };
 
   const onDimensionChanged = (index: number, value: number) => {
     client?.send({ type: 'UpdateDimensionValue', index, value });
     setIsDirty(true);
-    setHistory(prev => [`Maß → ${value.toFixed(2)}`, ...prev].slice(0, 12));
   };
 
   const onDimensionMoved = (index: number, offset: [number, number]) => {
     client?.send({ type: 'UpdateDimensionOffset', index, offset });
     setIsDirty(true);
-    setHistory(prev => [`Maß verschoben`, ...prev].slice(0, 12));
   };
 
   const onConstraintAdded = (constraint: SketchConstraint) => {
     client?.send({ type: 'AddConstraint', constraint });
     setIsDirty(true);
-    setHistory(prev => [`Constraint hinzugefügt`, ...prev]);
   };
 
   const onPointsMoved = (points: { id: string; x: number; y: number }[]) => {
     client?.send({ type: 'UpdatePoints', points });
     setIsDirty(true);
-    setHistory(prev => [`${points.length} Punkt${points.length === 1 ? '' : 'e'} verschoben`, ...prev].slice(0, 12));
+  };
+
+  const onCircleRadiusChanged = (id: string, radius: number) => {
+    client?.send({ type: 'UpdateCircleRadius', id, radius });
+    setIsDirty(true);
   };
 
   const onSelectionDeleted = (entities: string[], dimensions: number[]) => {
     client?.send({ type: 'DeleteSelection', entities, dimensions });
     setIsDirty(true);
-    setHistory(prev => [`Auswahl gelöscht`, ...prev].slice(0, 12));
   };
 
   const onSelectTool = () => setActiveTool('select');
 
   const onViewportFeedback = (message: string) => {
     setStatus(message);
-    setHistory(prev => [message, ...prev].slice(0, 12));
   };
 
-  const tools = [
+  const tools = createMemo(() => [
     { id: 'select', icon: '↖', label: 'SELECT' },
     { id: 'line', icon: '╱', label: 'LINE' },
     { id: 'circle', icon: '◯', label: 'CIRCLE' },
     { id: 'rect', icon: '□', label: 'RECT' },
     { id: 'triangle', icon: '△', label: 'TRI' },
     { id: 'polyline', icon: '⟪', label: 'POLY' },
-    { id: 'hexagon', icon: '⬢', label: 'HEX' },
-    { id: 'octagon', icon: '⯃', label: 'OCTA' },
+    { id: 'polygon', icon: '⬡', label: `${polygonSides()}-ECK` },
     { id: 'spline', icon: '〜', label: 'SPLINE' },
     { id: 'fillet', icon: '◰', label: 'FILLET' },
-  ];
+  ]);
 
   const constraints = [
     { id: 'horiz', icon: '—', label: 'HORIZ' },
@@ -356,30 +354,32 @@ const App: Component = () => {
           </nav>
           <div class="h-5 w-px bg-divider mx-1"></div>
           <div class="flex gap-0.5">
-            <button onClick={handleSketchUndo} title="Undo (Ctrl+Z)" class="btn-ghost px-2.5 py-1 text-xs font-semibold rounded">Undo</button>
-            <button onClick={handleSketchRedo} title="Redo (Ctrl+Y)" class="btn-ghost px-2.5 py-1 text-xs font-semibold rounded">Redo</button>
+            <button onClick={handleSketchUndo} title="Undo (Ctrl+Z)" class="btn-ghost px-2.5 py-1 text-[12px] font-semibold rounded">Undo</button>
+            <button onClick={handleSketchRedo} title="Redo (Ctrl+Y)" class="btn-ghost px-2.5 py-1 text-[12px] font-semibold rounded">Redo</button>
           </div>
           <Show when={currentProjectName()}>
             {(name) => (
               <>
                 <div class="h-5 w-px bg-divider mx-1"></div>
                 <div class="flex items-center gap-1.5">
-                  <span class="text-xs t-2 font-medium tracking-tight">{name()}</span>
+                  <span class="text-sm t-1 font-semibold">{name()}</span>
                   <Show when={isDirty()}>
-                    <span class="t-acc text-sm leading-none">•</span>
-                    <button onClick={quickSave} title="Schnellspeichern (Ctrl+S)" class="icon-btn t-acc">
+                    <span class="t-acc text-base leading-none">•</span>
+                    <button onClick={() => projectSaved() ? quickSave() : openSaveModal()} title={projectSaved() ? "Schnellspeichern (Ctrl+S)" : "Projekt anlegen"} class="icon-btn t-acc">
                       <svg viewBox="0 0 14 14" width="14" height="14" fill="currentColor">
                         <path d="M2 1a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1V4.5L9.5 1H2zm4.5 9a1.5 1.5 0 1 1 0-3 1.5 1.5 0 0 1 0 3zM3 2h5.5v3H3V2z"/>
                       </svg>
                     </button>
                   </Show>
-                  <button onClick={() => openSaveModal(true)} title="Neue Version anlegen" class="icon-btn t-3">
-                    <svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
-                      <circle cx="4" cy="2.5" r="1.5"/><circle cx="4" cy="11.5" r="1.5"/><circle cx="10.5" cy="7" r="1.5"/>
-                      <line x1="4" y1="4" x2="4" y2="10"/>
-                      <path d="M4 4 C4 6.5 10.5 5 10.5 7"/>
-                    </svg>
-                  </button>
+                  <Show when={projectSaved()}>
+                    <button onClick={() => openSaveModal(true)} title="Neue Version anlegen" class="icon-btn t-2">
+                      <svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round">
+                        <circle cx="4" cy="2.5" r="1.5"/><circle cx="4" cy="11.5" r="1.5"/><circle cx="10.5" cy="7" r="1.5"/>
+                        <line x1="4" y1="4" x2="4" y2="10"/>
+                        <path d="M4 4 C4 6.5 10.5 5 10.5 7"/>
+                      </svg>
+                    </button>
+                  </Show>
                 </div>
               </>
             )}
@@ -430,7 +430,7 @@ const App: Component = () => {
               <div class="p-4 border-b b-default">
                 <h2 class="section-title mb-4">Sketching</h2>
                 <div class="grid grid-cols-5 gap-1.5">
-                  <For each={tools}>
+                  <For each={tools()}>
                     {(tool) => (
                       <button
                         onClick={() => handleToolClick(tool.id)}
@@ -454,21 +454,6 @@ const App: Component = () => {
                       >
                         <span class="text-2xl font-bold leading-none">{c.icon}</span>
                       </button>
-                    )}
-                  </For>
-                </div>
-              </div>
-              <div class="p-4 flex-1 overflow-y-auto th-scrollbar">
-                <h2 class="section-title mb-3">{mode() === 'CAM' ? 'Toolpath' : 'History'}</h2>
-                <div class="space-y-1">
-                  <For each={history()}>
-                    {(item) => (
-                      <div class="history-item">
-                        <div class="flex items-center gap-2.5">
-                          <span class="w-1.5 h-1.5 rounded-full bg-current t-acc shrink-0"></span>
-                          <span class="text-xs font-medium t-2">{item}</span>
-                        </div>
-                      </div>
                     )}
                   </For>
                 </div>
@@ -514,6 +499,7 @@ const App: Component = () => {
           <Viewport
             mode={mode()}
             activeTool={activeTool()}
+            polygonSides={polygonSides()}
             toolActionVersion={toolActionVersion()}
             sketch={sketch()}
             annotations={annotations()}
@@ -523,6 +509,7 @@ const App: Component = () => {
             onDimensionMoved={onDimensionMoved}
             onConstraintAdded={onConstraintAdded}
             onPointsMoved={onPointsMoved}
+            onCircleRadiusChanged={onCircleRadiusChanged}
             onSelectionDeleted={onSelectionDeleted}
             onSelectTool={onSelectTool}
             onFeedback={onViewportFeedback}
@@ -705,7 +692,7 @@ const App: Component = () => {
         .btn-surface:hover { background-color: var(--elevated); color: var(--t-1); }
 
         .btn-ghost {
-          color: var(--t-3);
+          color: var(--t-1);
           transition: background-color .12s, color .12s;
         }
         .btn-ghost:hover { background-color: var(--surface); color: var(--t-1); }
@@ -719,27 +706,27 @@ const App: Component = () => {
 
         .btn-nav {
           padding: 4px 12px; border-radius: 4px;
-          font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-          color: var(--t-3);
+          font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+          color: var(--t-1);
           transition: background-color .12s, color .12s;
         }
         .btn-nav:hover { background-color: var(--surface); color: var(--t-1); }
         .btn-nav-active {
           padding: 4px 12px; border-radius: 4px;
-          font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+          font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
           background-color: var(--acc); color: var(--acc-fg);
         }
 
         .btn-mode {
           padding: 6px 20px; border-radius: 3px;
-          font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
-          color: var(--t-3);
+          font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: .04em;
+          color: var(--t-1);
           transition: color .12s;
         }
         .btn-mode:hover { color: var(--t-1); }
         .btn-mode-active {
           padding: 6px 20px; border-radius: 3px;
-          font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+          font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
           background-color: var(--acc); color: var(--acc-fg);
         }
 

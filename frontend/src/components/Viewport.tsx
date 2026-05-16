@@ -6,6 +6,7 @@ import { DimensionAnnotation, DimensionTarget, DrawObject, Sketch, SketchConstra
 interface ViewportProps {
   mode: 'Sketch' | 'Nesting' | 'CAM' | 'Simulation';
   activeTool: string | null;
+  polygonSides?: number;
   toolActionVersion: number;
   sketch: Sketch | null;
   annotations: DimensionAnnotation[];
@@ -15,12 +16,13 @@ interface ViewportProps {
   onDimensionMoved: (index: number, offset: [number, number]) => void;
   onConstraintAdded: (constraint: SketchConstraint) => void;
   onPointsMoved: (points: { id: string; x: number; y: number }[]) => void;
+  onCircleRadiusChanged: (id: string, radius: number) => void;
   onSelectionDeleted: (entities: string[], dimensions: number[]) => void;
   onSelectTool: () => void;
   onFeedback: (message: string) => void;
 }
 
-type SelectableKind = 'line' | 'circle' | 'point' | 'dimension';
+type SelectableKind = 'line' | 'circle' | 'point' | 'dimension' | 'rect-center';
 type DimensionMode = 'line' | 'radius' | 'diameter';
 
 interface SelectableMeta {
@@ -38,6 +40,24 @@ interface SelectableMeta {
   p2?: string;
   centerPoint?: string;
   annotationIndex?: number;
+  rectKey?: string;        // set on rect corner points
+  cornerIds?: string[];    // set on center handle
+  groupLineIds?: string[]; // set on center handle for constraint check
+  polygonKey?: string;     // set on polygon vertex points
+  polyVertexIndex?: number;
+  allPolyCornerIds?: string[];
+  allPolyLineIds?: string[];
+}
+
+interface RectDragState {
+  kind: 'corner' | 'center';
+  cornerIds: string[];
+  cornerOriginals: THREE.Vector3[];
+  cornerIndex?: number;
+  startWorld: THREE.Vector3;
+  moved: boolean;
+  currentPositions?: Map<string, THREE.Vector3>;
+  centerSprite?: THREE.Sprite;
 }
 
 interface DimensionDraft {
@@ -71,6 +91,26 @@ interface DimensionDragState {
   moved: boolean;
 }
 
+interface PolyVertexDragState {
+  polygonKey: string;
+  allCornerIds: string[];
+  allLineIds: string[];
+  originalCenter: THREE.Vector3;
+  originalPositions: THREE.Vector3[];
+  vertexIndex: number;
+  moved: boolean;
+  currentPositions?: Map<string, THREE.Vector3>;
+}
+
+interface CircleRadiusDragState {
+  entityId: string;
+  mesh: THREE.Mesh;
+  center: THREE.Vector3;
+  originalRadius: number;
+  currentRadius: number;
+  moved: boolean;
+}
+
 const CAD_COLORS = {
   sketch: 0x38b8c8,
   sketchMuted: 0x287f8f,
@@ -98,11 +138,15 @@ const Viewport: Component<ViewportProps> = (props) => {
   let tempObject: THREE.Object3D | null = null;
   let isDrawing = false;
   let startPoint: THREE.Vector3 | null = null;
+  let lastWorldPoint: THREE.Vector3 | null = null;
   let polyPoints: THREE.Vector3[] = [];
   let selected: THREE.Object3D[] = [];
   let selectionDrag: { start: { x: number; y: number }; current: { x: number; y: number }; active: boolean } | null = null;
   let dragState: DragState | null = null;
   let dimensionDragState: DimensionDragState | null = null;
+  let circleRadiusDragState: CircleRadiusDragState | null = null;
+  let polyVertexDragState: PolyVertexDragState | null = null;
+  let rectDragState: RectDragState | null = null;
   let selectionBox: HTMLDivElement | null = null;
   let dimensionDraft: DimensionDraft | null = null;
   let valueInput: HTMLInputElement | null = null;
@@ -112,7 +156,7 @@ const Viewport: Component<ViewportProps> = (props) => {
   const selectables: THREE.Object3D[] = [];
   const dimensionSelectables: THREE.Object3D[] = [];
   const sketchObjects: THREE.Object3D[] = [];
-  const geometryTools = new Set(['line', 'circle', 'rect', 'triangle', 'polyline', 'hexagon', 'octagon', 'spline']);
+  const geometryTools = new Set(['line', 'circle', 'rect', 'triangle', 'polyline', 'polygon', 'spline']);
   const constraintTools = new Set(['horiz', 'vert', 'parallel', 'coincident', 'equal', 'dimension', 'radius', 'diameter', 'angle']);
 
   onMount(() => {
@@ -229,6 +273,9 @@ const Viewport: Component<ViewportProps> = (props) => {
         selectionDrag = null;
         dragState = null;
         dimensionDragState = null;
+        circleRadiusDragState = null;
+        polyVertexDragState = null;
+        rectDragState = null;
         if (dimensionDraft) {
             scene.remove(dimensionDraft.preview);
             dimensionDraft = null;
@@ -334,7 +381,7 @@ const Viewport: Component<ViewportProps> = (props) => {
         });
     };
 
-    const makePointHandle = (id: string, position: THREE.Vector3) => {
+    const makePointHandle = (id: string, position: THREE.Vector3, rectKey?: string, polygonKey?: string, polyVertexIndex?: number, allPolyCornerIds?: string[], allPolyLineIds?: string[]) => {
         const sprite = new THREE.Sprite(pointSpriteMaterial());
         sprite.position.copy(position);
         sprite.userData.screenSize = { width: 16, height: 16 };
@@ -345,6 +392,34 @@ const Viewport: Component<ViewportProps> = (props) => {
           label: id,
           pointId: id,
           pos: position.clone(),
+          rectKey,
+          polygonKey,
+          polyVertexIndex,
+          allPolyCornerIds,
+          allPolyLineIds,
+        });
+    };
+
+    const makeCenterHandle = (key: string, cornerIds: string[], centerPos: THREE.Vector3, groupLineIds: string[] = []) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 40; canvas.height = 40;
+        const ctx = canvas.getContext('2d')!;
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)'; ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.moveTo(20, 6); ctx.lineTo(20, 34);
+        ctx.moveTo(6, 20); ctx.lineTo(34, 20);
+        ctx.stroke();
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false }));
+        sprite.position.copy(centerPos);
+        sprite.userData.screenSize = { width: 18, height: 18 };
+        sprite.renderOrder = 38;
+        addSelectable(sprite, {
+            entityId: `poly_center_${key}`,
+            kind: 'rect-center',
+            label: `${key} center`,
+            pos: centerPos.clone(),
+            cornerIds,
+            groupLineIds,
         });
     };
 
@@ -426,7 +501,7 @@ const Viewport: Component<ViewportProps> = (props) => {
             const radius = Math.abs(edge.x - center.x);
             return Math.abs(Math.hypot(point.x - center.x, point.y - center.y) - radius);
         }
-        if (meta.kind === 'point' && meta.pos) {
+        if ((meta.kind === 'point' || meta.kind === 'rect-center') && meta.pos) {
             const center = worldToScreen(meta.pos);
             return Math.hypot(point.x - center.x, point.y - center.y);
         }
@@ -825,6 +900,20 @@ const Viewport: Component<ViewportProps> = (props) => {
             }
         }
 
+        // Detect rect groups from entity IDs (rect_{N}_{suffix})
+        const rectGroups = new Map<string, { cornerIds: string[] }>();
+        for (const entity of sketch.entities) {
+            if ('Line' in entity) {
+                const m = entity.Line.id.match(/^rect_(\d+)_/);
+                if (m) {
+                    const k = m[1];
+                    if (!rectGroups.has(k)) rectGroups.set(k, { cornerIds: [`p${k}_0`, `p${k}_1`, `p${k}_2`, `p${k}_3`] });
+                }
+            }
+        }
+        const pointRectKey = new Map<string, string>();
+        for (const [k, g] of rectGroups) g.cornerIds.forEach((id) => pointRectKey.set(id, k));
+
         for (const entity of sketch.entities) {
             if ('Line' in entity) {
                 const start = points.get(entity.Line.p1);
@@ -849,8 +938,57 @@ const Viewport: Component<ViewportProps> = (props) => {
                 });
             }
         }
+        // Detect triangle/hexagon/octagon/pentagon groups
+        const polySides: Record<string, number> = { triangle: 3, pentagon: 5, hexagon: 6, octagon: 8 };
+        const polyGroups = new Map<string, { key: string; cornerIds: string[]; lineIds: string[] }>();
+        for (const entity of sketch.entities) {
+            if ('Line' in entity) {
+                for (const prefix of Object.keys(polySides)) {
+                    const m = entity.Line.id.match(new RegExp(`^${prefix}_(\\d+)_`));
+                    if (m) {
+                        const key = `${prefix}_${m[1]}`;
+                        if (!polyGroups.has(key)) polyGroups.set(key, { key, cornerIds: [], lineIds: [] });
+                        polyGroups.get(key)!.lineIds.push(entity.Line.id);
+                    }
+                }
+            }
+        }
+        for (const [, g] of polyGroups) {
+            const n = g.key.split('_')[1];
+            const sides = polySides[g.key.split('_')[0]] ?? 0;
+            g.cornerIds = Array.from({ length: sides }, (_, i) => `p${n}_${i}`);
+        }
+
+        // Build polygon point meta map so point handles know their polygon
+        const pointPolyMeta = new Map<string, { polygonKey: string; polyVertexIndex: number; allPolyCornerIds: string[]; allPolyLineIds: string[] }>();
+        for (const [, g] of polyGroups) {
+            g.cornerIds.forEach((id, idx) => {
+                pointPolyMeta.set(id, { polygonKey: g.key, polyVertexIndex: idx, allPolyCornerIds: g.cornerIds, allPolyLineIds: g.lineIds });
+            });
+        }
+
         for (const [id, position] of points) {
-            makePointHandle(id, position);
+            const rectKey = pointRectKey.get(id);
+            const pm = pointPolyMeta.get(id);
+            makePointHandle(id, position, rectKey, pm?.polygonKey, pm?.polyVertexIndex, pm?.allPolyCornerIds, pm?.allPolyLineIds);
+        }
+
+        // Add center handles for rects
+        for (const [k, g] of rectGroups) {
+            const corners = g.cornerIds.map((id) => points.get(id)).filter(Boolean) as THREE.Vector3[];
+            if (corners.length !== 4) continue;
+            const cx = corners.reduce((s, p) => s + p.x, 0) / 4;
+            const cy = corners.reduce((s, p) => s + p.y, 0) / 4;
+            const lineIds = [`rect_${k}_0`, `rect_${k}_1`, `rect_${k}_2`, `rect_${k}_close`];
+            makeCenterHandle(`rect_${k}`, g.cornerIds, new THREE.Vector3(cx, cy, 0), lineIds);
+        }
+        // Add center handles for polygons
+        for (const [, g] of polyGroups) {
+            const corners = g.cornerIds.map((id) => points.get(id)).filter(Boolean) as THREE.Vector3[];
+            if (corners.length === 0) continue;
+            const cx = corners.reduce((s, p) => s + p.x, 0) / corners.length;
+            const cy = corners.reduce((s, p) => s + p.y, 0) / corners.length;
+            makeCenterHandle(g.key, g.cornerIds, new THREE.Vector3(cx, cy, 0), g.lineIds);
         }
         renderConstraintMarkers(sketch.constraints);
     };
@@ -913,6 +1051,45 @@ const Viewport: Component<ViewportProps> = (props) => {
         dimension.offsetPoint = offsetPoint.clone();
     };
 
+    const setCursor = (cursor: string) => {
+        renderer.domElement.style.cursor = cursor;
+    };
+
+    const updateCursor = (e: MouseEvent) => {
+        if (dragState || dimensionDragState || circleRadiusDragState || rectDragState || polyVertexDragState) { setCursor('grabbing'); return; }
+        if (selectionDrag?.active) { setCursor('crosshair'); return; }
+        const tool = props.activeTool;
+        if (!tool || geometryTools.has(tool) || constraintTools.has(tool)) { setCursor('crosshair'); return; }
+        if (tool === 'select') {
+            const object = nearestSelectable(e);
+            if (object) {
+                const meta = metaOf(object);
+                if (meta.kind === 'rect-center') {
+                    const lineIds = meta.groupLineIds ?? [];
+                    const cids = meta.cornerIds ?? [];
+                    const locked = lineIds.some((id) => isLineConstrained(id)) || cids.some((id) => isPointConstrained(id));
+                    setCursor(locked ? 'pointer' : 'move');
+                    return;
+                }
+                if (meta.kind === 'point' && meta.pointId) {
+                    if (meta.rectKey) { setCursor(isRectConstrained(meta.rectKey) ? 'pointer' : 'nwse-resize'); return; }
+                    setCursor(isPointConstrained(meta.pointId) ? 'pointer' : 'grab');
+                    return;
+                }
+                if (meta.kind === 'line' && meta.p1 && meta.p2) {
+                    setCursor(isLineConstrained(meta.entityId, meta.p1, meta.p2) ? 'pointer' : 'move');
+                    return;
+                }
+                if (meta.kind === 'circle' && !isRadiusConstrained(meta.entityId)) { setCursor('ew-resize'); return; }
+                setCursor('pointer');
+            } else {
+                setCursor('default');
+            }
+            return;
+        }
+        setCursor('default');
+    };
+
     const nearestSelectable = (e: MouseEvent, tolerancePx = 12) => {
         const rect = containerRef!.getBoundingClientRect();
         mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
@@ -922,11 +1099,14 @@ const Viewport: Component<ViewportProps> = (props) => {
         if (labelHit) return labelHit;
 
         const point = mouseToLocal(e);
-        let best: { object: THREE.Object3D; distance: number } | null = null;
+        let best: { object: THREE.Object3D; distance: number; priority: number } | null = null;
         for (const object of selectables) {
             const distance = screenHitDistance(object, point);
-            if (distance <= tolerancePx && (!best || distance < best.distance)) {
-                best = { object, distance };
+            if (distance > tolerancePx) continue;
+            const k = metaOf(object).kind;
+            const priority = k === 'point' ? 2 : k === 'rect-center' ? 1 : 0;
+            if (!best || priority > best.priority || (priority === best.priority && distance < best.distance)) {
+                best = { object, distance, priority };
             }
         }
         return best?.object;
@@ -1079,9 +1259,266 @@ const Viewport: Component<ViewportProps> = (props) => {
         }
     };
 
+    const isRadiusConstrained = (entityId: string) =>
+        props.annotations.some((a) => {
+            const t = a.target as any;
+            return (t.CircleRadius?.circle === entityId) || (t.CircleDiameter?.circle === entityId);
+        });
+
+    const isLineConstrained = (entityId: string, p1 = '', p2 = '') => {
+        const cs = (props.sketch?.constraints ?? []) as any[];
+        const inConstraints = cs.some((c) =>
+            c.Horizontal === entityId ||
+            c.Vertical === entityId ||
+            c.Parallel?.[0] === entityId || c.Parallel?.[1] === entityId ||
+            c.Perpendicular?.[0] === entityId || c.Perpendicular?.[1] === entityId ||
+            c.EqualLength?.[0] === entityId || c.EqualLength?.[1] === entityId ||
+            c.Length?.line === entityId ||
+            c.Coincident?.[0] === p1 || c.Coincident?.[1] === p1 ||
+            c.Coincident?.[0] === p2 || c.Coincident?.[1] === p2
+        );
+        const inAnnotations = props.annotations.some((a) => {
+            const t = a.target as any;
+            return t.LineLength?.line === entityId || t.LineAngle?.line === entityId ||
+                   t.LineToLineAngle?.first === entityId || t.LineToLineAngle?.second === entityId;
+        });
+        return inConstraints || inAnnotations;
+    };
+
+    const isRectConstrained = (rectKey: string) => {
+        const lineIds = [`rect_${rectKey}_0`, `rect_${rectKey}_1`, `rect_${rectKey}_2`, `rect_${rectKey}_close`];
+        const cornerIds = [`p${rectKey}_0`, `p${rectKey}_1`, `p${rectKey}_2`, `p${rectKey}_3`];
+        return lineIds.some((id) => isLineConstrained(id)) || cornerIds.some((id) => isPointConstrained(id));
+    };
+
+    const isPointConstrained = (pointId: string) => {
+        const cs = (props.sketch?.constraints ?? []) as any[];
+        return cs.some((c) =>
+            c.Coincident?.[0] === pointId || c.Coincident?.[1] === pointId ||
+            c.DistanceX?.first === pointId || c.DistanceX?.second === pointId ||
+            c.DistanceY?.first === pointId || c.DistanceY?.second === pointId ||
+            (Array.isArray(c.Distance) && (c.Distance[0] === pointId || c.Distance[1] === pointId))
+        );
+    };
+
+    const beginCircleRadiusDrag = (mesh: THREE.Mesh, meta: SelectableMeta, startWorld: THREE.Vector3) => {
+        if (!meta.center || meta.radius === undefined) return false;
+        if (isRadiusConstrained(meta.entityId)) return false;
+        clearSelection();
+        selectObject(mesh);
+        circleRadiusDragState = {
+            entityId: meta.entityId,
+            mesh,
+            center: meta.center.clone(),
+            originalRadius: meta.radius,
+            currentRadius: meta.radius,
+            moved: false,
+        };
+        controls.enabled = false;
+        setCursor('grabbing');
+        props.onFeedback('CIRCLE: radius ziehen');
+        return true;
+    };
+
+    const updateCircleRadiusDrag = (point: THREE.Vector3) => {
+        if (!circleRadiusDragState) return;
+        const newRadius = Math.max(1, circleRadiusDragState.center.distanceTo(point));
+        circleRadiusDragState.currentRadius = newRadius;
+        circleRadiusDragState.moved = true;
+        const mesh = circleRadiusDragState.mesh;
+        mesh.geometry.dispose();
+        mesh.geometry = new THREE.RingGeometry(newRadius - 0.5, newRadius + 0.5, 64);
+        const meta = metaOf(mesh);
+        meta.radius = newRadius;
+    };
+
+    const finishCircleRadiusDrag = () => {
+        if (!circleRadiusDragState) return false;
+        const current = circleRadiusDragState;
+        circleRadiusDragState = null;
+        controls.enabled = true;
+        setCursor('default');
+        if (!current.moved) {
+            clearSelection();
+            selectObject(current.mesh);
+            props.onFeedback(`SELECT: ${metaOf(current.mesh).label}`);
+            return true;
+        }
+        props.onCircleRadiusChanged(current.entityId, current.currentRadius);
+        props.onFeedback(`CIRCLE: radius → ${current.currentRadius.toFixed(1)}`);
+        return true;
+    };
+
+    const rectCornerPositions = (cornerIds: string[]) =>
+        cornerIds.map((id) => {
+            const obj = selectables.find((o) => metaOf(o).pointId === id);
+            return obj ? (metaOf(obj).pos?.clone() ?? new THREE.Vector3()) : new THREE.Vector3();
+        });
+
+    const beginRectCornerDrag = (object: THREE.Object3D, meta: SelectableMeta, startWorld: THREE.Vector3) => {
+        const rectKey = meta.rectKey!;
+        if (isRectConstrained(rectKey)) {
+            clearSelection(); selectObject(object);
+            props.onFeedback('SELECT: rect (constrained)');
+            return true;
+        }
+        const cornerIds = [`p${rectKey}_0`, `p${rectKey}_1`, `p${rectKey}_2`, `p${rectKey}_3`];
+        const cornerOriginals = rectCornerPositions(cornerIds);
+        const cornerIndex = cornerIds.indexOf(meta.pointId!);
+        if (cornerIndex < 0) return false;
+        const centerSprite = selectables.find((o) => metaOf(o).entityId === `rect_center_${rectKey}`) as THREE.Sprite | undefined;
+        clearSelection(); selectObject(object);
+        rectDragState = { kind: 'corner', cornerIds, cornerOriginals, cornerIndex, startWorld: startWorld.clone(), moved: false, centerSprite };
+        controls.enabled = false;
+        setCursor('grabbing');
+        props.onFeedback('RECT: Eckpunkt ziehen');
+        return true;
+    };
+
+    const beginRectCenterDrag = (object: THREE.Object3D, meta: SelectableMeta, startWorld: THREE.Vector3) => {
+        const lineIds = meta.groupLineIds ?? [];
+        const cornerIds = meta.cornerIds ?? [];
+        if (lineIds.some((id) => isLineConstrained(id)) || cornerIds.some((id) => isPointConstrained(id))) {
+            clearSelection(); selectObject(object);
+            props.onFeedback('SELECT: rect (constrained)');
+            return true;
+        }
+        const cornerOriginals = rectCornerPositions(cornerIds);
+        clearSelection(); selectObject(object);
+        rectDragState = { kind: 'center', cornerIds, cornerOriginals, startWorld: startWorld.clone(), moved: false, centerSprite: object as THREE.Sprite };
+        controls.enabled = false;
+        setCursor('grabbing');
+        props.onFeedback('RECT: verschieben');
+        return true;
+    };
+
+    const updateRectDrag = (point: THREE.Vector3) => {
+        if (!rectDragState) return;
+        rectDragState.moved = true;
+        const updates = new Map<string, THREE.Vector3>();
+        if (rectDragState.kind === 'center') {
+            const delta = point.clone().sub(rectDragState.startWorld);
+            rectDragState.cornerOriginals.forEach((orig, i) => updates.set(rectDragState!.cornerIds[i], orig.clone().add(delta)));
+            if (rectDragState.centerSprite) {
+                const cx = rectDragState.cornerOriginals.reduce((s, p) => s + p.x, 0) / 4 + delta.x;
+                const cy = rectDragState.cornerOriginals.reduce((s, p) => s + p.y, 0) / 4 + delta.y;
+                rectDragState.centerSprite.position.set(cx, cy, 0);
+                (metaOf(rectDragState.centerSprite) as SelectableMeta).pos = new THREE.Vector3(cx, cy, 0);
+            }
+        } else {
+            const i = rectDragState.cornerIndex!;
+            const opp = rectDragState.cornerOriginals[(i + 2) % 4];
+            const [nx, ny, ox, oy] = [point.x, point.y, opp.x, opp.y];
+            const pos: THREE.Vector3[] = [new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3(), new THREE.Vector3()];
+            pos[i] = new THREE.Vector3(nx, ny, 0);
+            pos[(i + 2) % 4] = opp.clone();
+            pos[(i + 1) % 4] = new THREE.Vector3(ox, ny, 0);
+            pos[(i + 3) % 4] = new THREE.Vector3(nx, oy, 0);
+            pos.forEach((p, j) => updates.set(rectDragState!.cornerIds[j], p));
+            if (rectDragState.centerSprite) {
+                rectDragState.centerSprite.position.set((nx + ox) / 2, (ny + oy) / 2, 0);
+            }
+        }
+        rectDragState.currentPositions = updates;
+        applyDragPreview(updates);
+    };
+
+    const finishRectDrag = () => {
+        if (!rectDragState) return false;
+        const current = rectDragState;
+        rectDragState = null;
+        controls.enabled = true;
+        setCursor('default');
+        if (!current.moved || !current.currentPositions) return true;
+        props.onPointsMoved([...current.currentPositions].map(([id, p]) => ({ id, x: p.x, y: p.y })));
+        props.onFeedback(current.kind === 'center' ? 'RECT: verschoben' : 'RECT: skaliert');
+        return true;
+    };
+
+    const polyCornerPositions = (cornerIds: string[]) =>
+        cornerIds.map((id) => {
+            const obj = selectables.find((o) => metaOf(o)?.pointId === id);
+            return obj ? obj.position.clone() : new THREE.Vector3();
+        });
+
+    const beginPolyVertexDrag = (object: THREE.Object3D, meta: SelectableMeta, startWorld: THREE.Vector3) => {
+        const { polygonKey, allPolyCornerIds, allPolyLineIds, polyVertexIndex } = meta;
+        if (!polygonKey || !allPolyCornerIds || polyVertexIndex === undefined) return false;
+        if ((allPolyLineIds ?? []).some((id) => isLineConstrained(id)) || allPolyCornerIds.some((id) => isPointConstrained(id))) {
+            clearSelection(); selectObject(object);
+            props.onFeedback('SELECT: polygon (constrained)');
+            return true;
+        }
+        const originalPositions = polyCornerPositions(allPolyCornerIds);
+        const cx = originalPositions.reduce((s, p) => s + p.x, 0) / originalPositions.length;
+        const cy = originalPositions.reduce((s, p) => s + p.y, 0) / originalPositions.length;
+        clearSelection(); selectObject(object);
+        polyVertexDragState = {
+            polygonKey, allCornerIds: allPolyCornerIds, allLineIds: allPolyLineIds ?? [],
+            originalCenter: new THREE.Vector3(cx, cy, 0), originalPositions,
+            vertexIndex: polyVertexIndex, moved: false,
+        };
+        controls.enabled = false;
+        setCursor('grabbing');
+        props.onFeedback('POLYGON: Ecke ziehen — Radius/Drehung');
+        return true;
+    };
+
+    const updatePolyVertexDrag = (point: THREE.Vector3) => {
+        if (!polyVertexDragState) return;
+        polyVertexDragState.moved = true;
+        const { originalCenter, originalPositions, vertexIndex } = polyVertexDragState;
+        const newRadius = Math.max(1, originalCenter.distanceTo(point));
+        const origDragged = originalPositions[vertexIndex];
+        const origAngle = Math.atan2(origDragged.y - originalCenter.y, origDragged.x - originalCenter.x);
+        const newAngle = Math.atan2(point.y - originalCenter.y, point.x - originalCenter.x);
+        const angleOffset = newAngle - origAngle;
+        const updates = new Map<string, THREE.Vector3>();
+        originalPositions.forEach((origPos, i) => {
+            const ang = Math.atan2(origPos.y - originalCenter.y, origPos.x - originalCenter.x) + angleOffset;
+            updates.set(polyVertexDragState!.allCornerIds[i], new THREE.Vector3(
+                originalCenter.x + newRadius * Math.cos(ang),
+                originalCenter.y + newRadius * Math.sin(ang),
+                0
+            ));
+        });
+        applyDragPreview(updates);
+        polyVertexDragState.currentPositions = updates;
+    };
+
+    const finishPolyVertexDrag = () => {
+        if (!polyVertexDragState) return false;
+        const current = polyVertexDragState;
+        polyVertexDragState = null;
+        controls.enabled = true;
+        setCursor('default');
+        if (!current.moved || !current.currentPositions) return true;
+        props.onPointsMoved([...current.currentPositions].map(([id, p]) => ({ id, x: p.x, y: p.y })));
+        props.onFeedback('POLYGON: Radius/Drehung angepasst');
+        return true;
+    };
+
     const beginDrag = (object: THREE.Object3D, startWorld: THREE.Vector3) => {
         const meta = metaOf(object);
         if (meta.kind === 'dimension') return beginDimensionDrag(meta, startWorld);
+        if (meta.kind === 'circle') return beginCircleRadiusDrag(object as THREE.Mesh, meta, startWorld);
+        if (meta.kind === 'rect-center') return beginRectCenterDrag(object, meta, startWorld);
+        if (meta.kind === 'line' && meta.p1 && meta.p2) {
+            if (isLineConstrained(meta.entityId, meta.p1, meta.p2)) {
+                clearSelection(); selectObject(object);
+                props.onFeedback(`SELECT: ${meta.label} (constrained)`);
+                return true;
+            }
+        }
+        if (meta.kind === 'point' && meta.pointId) {
+            if (meta.rectKey) return beginRectCornerDrag(object, meta, startWorld);
+            if (meta.polygonKey) return beginPolyVertexDrag(object, meta, startWorld);
+            if (isPointConstrained(meta.pointId)) {
+                clearSelection(); selectObject(object);
+                props.onFeedback(`SELECT: point (constrained)`);
+                return true;
+            }
+        }
         const originals = dragOriginals(meta);
         if (originals.size === 0) return false;
         if (!selected.includes(object)) {
@@ -1097,6 +1534,7 @@ const Viewport: Component<ViewportProps> = (props) => {
             moved: false,
         };
         controls.enabled = false;
+        setCursor('grabbing');
         props.onFeedback(`${meta.kind.toUpperCase()}: drag to move`);
         return true;
     };
@@ -1115,6 +1553,7 @@ const Viewport: Component<ViewportProps> = (props) => {
             moved: false,
         };
         controls.enabled = false;
+        setCursor('grabbing');
         props.onFeedback('DIM: drag label to reposition');
         return true;
     };
@@ -1160,6 +1599,7 @@ const Viewport: Component<ViewportProps> = (props) => {
         const current = dragState;
         dragState = null;
         controls.enabled = true;
+        setCursor('default');
         if (!current.moved) {
             clearSelection();
             selectObject(current.object);
@@ -1176,6 +1616,7 @@ const Viewport: Component<ViewportProps> = (props) => {
         const current = dimensionDragState;
         dimensionDragState = null;
         controls.enabled = true;
+        setCursor('default');
         const dimension = dimensions[current.index];
         if (!dimension) return true;
         if (!current.moved) {
@@ -1306,6 +1747,24 @@ const Viewport: Component<ViewportProps> = (props) => {
         applyConstraintToSelection(tool);
     });
 
+    createEffect(() => {
+        const tool = props.activeTool;
+        if (!tool || tool === 'select') setCursor('default');
+        else setCursor('crosshair');
+    });
+
+    createEffect(() => {
+        const sides = props.polygonSides;
+        if (!isDrawing || !startPoint || props.activeTool !== 'polygon' || !lastWorldPoint) return;
+        if (tempObject) scene.remove(tempObject);
+        const mat = new THREE.MeshBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true });
+        const radius = startPoint.distanceTo(lastWorldPoint);
+        tempObject = new THREE.Mesh(new THREE.RingGeometry(radius - 0.2, radius + 0.2, sides ?? 6), mat);
+        tempObject.position.set(startPoint.x, startPoint.y, 0);
+        tempObject.rotation.z = Math.PI / (sides ?? 6);
+        scene.add(tempObject);
+    });
+
     const handleMouseDown = (e: MouseEvent) => {
         if (!props.activeTool) return;
         if (e.button === 2) {
@@ -1379,12 +1838,17 @@ const Viewport: Component<ViewportProps> = (props) => {
                 } else if (props.activeTool === 'line') {
                     props.onObjectAdded({ type: 'Line', p1: [startPoint.x, startPoint.y], p2: [point.x, point.y] });
                 } else if (props.activeTool === 'rect') {
-                    const w = point.x - startPoint.x;
-                    const h = point.y - startPoint.y;
-                    props.onObjectAdded({ type: 'Rect', x: startPoint.x, y: startPoint.y, w, h });
-                } else if (['hexagon', 'octagon', 'triangle'].includes(props.activeTool)) {
+                    const hw = point.x - startPoint.x;
+                    const hh = point.y - startPoint.y;
+                    props.onObjectAdded({ type: 'Rect', x: startPoint.x - hw, y: startPoint.y - hh, w: 2 * hw, h: 2 * hh });
+                } else if (props.activeTool === 'triangle') {
                     const radius = startPoint.distanceTo(point);
-                    props.onObjectAdded({ type: props.activeTool.toUpperCase() as 'TRIANGLE' | 'HEXAGON' | 'OCTAGON', center: [startPoint.x, startPoint.y], radius });
+                    props.onObjectAdded({ type: 'TRIANGLE', center: [startPoint.x, startPoint.y], radius });
+                } else if (props.activeTool === 'polygon') {
+                    const radius = startPoint.distanceTo(point);
+                    const sides = props.polygonSides ?? 6;
+                    const type = sides === 5 ? 'PENTAGON' : sides === 8 ? 'OCTAGON' : 'HEXAGON';
+                    props.onObjectAdded({ type, center: [startPoint.x, startPoint.y], radius });
                 }
             }
             
@@ -1396,6 +1860,19 @@ const Viewport: Component<ViewportProps> = (props) => {
     };
 
     const handleMouseMove = (e: MouseEvent) => {
+        updateCursor(e);
+        if (rectDragState) {
+            updateRectDrag(getIntersectPoint(e));
+            return;
+        }
+        if (polyVertexDragState) {
+            updatePolyVertexDrag(getIntersectPoint(e));
+            return;
+        }
+        if (circleRadiusDragState) {
+            updateCircleRadiusDrag(getIntersectPoint(e));
+            return;
+        }
         if (dimensionDragState) {
             updateDimensionDrag(getIntersectPoint(e));
             return;
@@ -1419,6 +1896,7 @@ const Viewport: Component<ViewportProps> = (props) => {
         }
         if (!isDrawing || !props.activeTool || !geometryTools.has(props.activeTool)) return;
         const point = getIntersectPoint(e);
+        lastWorldPoint = point.clone();
         if (tempObject) scene.remove(tempObject);
 
         const mat = new THREE.MeshBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true });
@@ -1444,12 +1922,26 @@ const Viewport: Component<ViewportProps> = (props) => {
         } else if (props.activeTool === 'line') {
             tempObject = new THREE.Line(new THREE.BufferGeometry().setFromPoints([startPoint.clone(), point.clone()]), new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true }));
         } else if (props.activeTool === 'rect') {
-            const w = point.x - startPoint.x;
-            const h = point.y - startPoint.y;
-            tempObject = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.PlaneGeometry(w, h)), new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, transparent: true, opacity: 0.46 }));
-            tempObject.position.set(startPoint.x + w/2, startPoint.y + h/2, 0);
-        } else if (['hexagon', 'octagon', 'triangle'].includes(props.activeTool!)) {
-            const sides = props.activeTool === 'hexagon' ? 6 : props.activeTool === 'octagon' ? 8 : 3;
+            const hw = point.x - startPoint.x;
+            const hh = point.y - startPoint.y;
+            const group = new THREE.Group();
+            group.add(new THREE.LineSegments(
+                new THREE.EdgesGeometry(new THREE.PlaneGeometry(2 * Math.abs(hw), 2 * Math.abs(hh))),
+                new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, transparent: true, opacity: 0.46 })
+            ));
+            // Center crosshair
+            const crossMat = new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, transparent: true, opacity: 0.3 });
+            group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(-5, 0, 0), new THREE.Vector3(5, 0, 0)]), crossMat));
+            group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0, -5, 0), new THREE.Vector3(0, 5, 0)]), crossMat));
+            group.position.set(startPoint.x, startPoint.y, 0);
+            tempObject = group;
+        } else if (props.activeTool === 'triangle') {
+            const radius = startPoint.distanceTo(point);
+            tempObject = new THREE.Mesh(new THREE.RingGeometry(radius - 0.2, radius + 0.2, 3), mat);
+            tempObject.position.set(startPoint.x, startPoint.y, 0);
+            tempObject.rotation.z = Math.PI / 3;
+        } else if (props.activeTool === 'polygon') {
+            const sides = props.polygonSides ?? 6;
             const radius = startPoint.distanceTo(point);
             tempObject = new THREE.Mesh(new THREE.RingGeometry(radius - 0.2, radius + 0.2, sides), mat);
             tempObject.position.set(startPoint.x, startPoint.y, 0);
@@ -1460,6 +1952,18 @@ const Viewport: Component<ViewportProps> = (props) => {
     };
 
     const handleMouseUp = (e: MouseEvent) => {
+        if (rectDragState) {
+            finishRectDrag();
+            return;
+        }
+        if (polyVertexDragState) {
+            finishPolyVertexDrag();
+            return;
+        }
+        if (circleRadiusDragState) {
+            finishCircleRadiusDrag();
+            return;
+        }
         if (dimensionDragState) {
             finishDimensionDrag();
             return;

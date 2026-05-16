@@ -1,7 +1,7 @@
 {
   "format": "thorcc.project",
   "file_version": 1,
-  "saved_at": 1778912375,
+  "saved_at": 1778915579,
   "comment": "dasdsa",
   "project": {
     "name": "Papaerlappp",
@@ -11,8 +11,8 @@
           "Point": {
             "id": "p0_0",
             "pos": {
-              "x": -165.0,
-              "y": 80.0
+              "x": -120.0,
+              "y": 105.0
             }
           }
         },
@@ -20,7 +20,7 @@
           "Circle": {
             "id": "circle_0",
             "center": "p0_0",
-            "radius": 99.62429422585636
+            "radius": 30.0
           }
         },
         {
@@ -101,7 +101,7 @@
             "id": "p10_1",
             "pos": {
               "x": 35.15564437074637,
-              "y": 124.91060010942235
+              "y": 124.91060010942236
             }
           }
         },
@@ -110,7 +110,7 @@
             "id": "p10_2",
             "pos": {
               "x": -5.155644370746362,
-              "y": 124.91060010942235
+              "y": 124.91060010942236
             }
           }
         },
@@ -184,8 +184,28 @@
           }
         }
       ],
-      "constraints": []
+      "constraints": [
+        {
+          "Diameter": {
+            "circle": "circle_0",
+            "value": 60.0
+          }
+        }
+      ]
     },
-    "annotations": []
+    "annotations": [
+      {
+        "target": {
+          "CircleDiameter": {
+            "circle": "circle_0"
+          }
+        },
+        "value": 60.0,
+        "offset": [
+          -140.0,
+          65.0
+        ]
+      }
+    ]
   }
 }
