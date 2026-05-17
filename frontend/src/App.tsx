@@ -24,6 +24,7 @@ const App: Component = () => {
   const [currentProjectName, setCurrentProjectName] = createSignal<string | null>(null);
   const [projectSaved, setProjectSaved] = createSignal(false);
   const [polygonSides, setPolygonSides] = createSignal<5 | 6 | 8>(6);
+  const [polylineMode, setPolylineMode] = createSignal<'line' | 'arc-half' | 'arc-quarter'>('line');
 
   let client: ThorClient | undefined;
   let importInputRef: HTMLInputElement | undefined;
@@ -82,6 +83,12 @@ const App: Component = () => {
         setPolygonSides(s => s === 5 ? 6 : s === 6 ? 8 : 5);
         const sides = polygonSides();
         setStatus(`POLYGON: ${sides}-Eck`);
+        return;
+      }
+      if (event.key.toLowerCase() === 'm' && activeTool() === 'polyline') {
+        setPolylineMode(m => m === 'line' ? 'arc-half' : m === 'arc-half' ? 'arc-quarter' : 'line');
+        const modeLabel = polylineMode() === 'line' ? 'LINIE' : polylineMode() === 'arc-half' ? 'HALBKREIS' : 'VIERTELKREIS';
+        setStatus(`POLYLINE: ${modeLabel}`);
         return;
       }
       if (event.key !== 'Escape') return;
@@ -268,8 +275,10 @@ const App: Component = () => {
     if (client) {
       client.send({ type: 'AddObject', object: obj });
       setIsDirty(true);
-      setActiveTool('select');
-      setStatus("SELECT: bereit");
+      if (activeTool() !== 'polyline' && activeTool() !== 'spline') {
+        setActiveTool('select');
+        setStatus("SELECT: bereit");
+      }
     }
   };
 
@@ -500,6 +509,7 @@ const App: Component = () => {
             mode={mode()}
             activeTool={activeTool()}
             polygonSides={polygonSides()}
+            polylineMode={polylineMode()}
             toolActionVersion={toolActionVersion()}
             sketch={sketch()}
             annotations={annotations()}

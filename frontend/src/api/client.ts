@@ -3,7 +3,14 @@ export type DrawObject =
   | { type: 'Circle'; center: [number, number]; radius: number }
   | { type: 'Rect'; x: number; y: number; w: number; h: number }
   | { type: 'TRIANGLE' | 'PENTAGON' | 'HEXAGON' | 'OCTAGON'; center: [number, number]; radius: number }
-  | { type: 'POLYLINE' | 'SPLINE'; points: [number, number][] };
+  | { type: 'POLYLINE'; points: [number, number][]; closed?: boolean }
+  | { type: 'POLYPATH'; points: [number, number][]; segments: PolyPathSegment[]; closed?: boolean }
+  | { type: 'SPLINE'; points: [number, number][] }
+  | { type: 'Arc'; center: [number, number]; start: [number, number]; end: [number, number] };
+
+export type PolyPathSegment =
+  | { type: 'Line' }
+  | { type: 'Arc'; center: [number, number] };
 
 export type SketchPoint = { x: number; y: number } | [number, number];
 

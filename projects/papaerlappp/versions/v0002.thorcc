@@ -1,7 +1,7 @@
 {
   "format": "thorcc.project",
   "file_version": 1,
-  "saved_at": 1778915579,
+  "saved_at": 1779056517,
   "comment": "dasdsa",
   "project": {
     "name": "Papaerlappp",
@@ -9,186 +9,136 @@
       "entities": [
         {
           "Point": {
-            "id": "p0_0",
+            "id": "p22_0",
             "pos": {
-              "x": -120.0,
-              "y": 105.0
-            }
-          }
-        },
-        {
-          "Circle": {
-            "id": "circle_0",
-            "center": "p0_0",
-            "radius": 30.0
-          }
-        },
-        {
-          "Point": {
-            "id": "p2_0",
-            "pos": {
-              "x": -85.0,
-              "y": 10.0
+              "x": -10.0,
+              "y": -110.0
             }
           }
         },
         {
           "Point": {
-            "id": "p2_1",
+            "id": "p22_1",
             "pos": {
-              "x": -5.0,
-              "y": 10.0
+              "x": 125.0,
+              "y": -110.0
             }
           }
         },
         {
           "Point": {
-            "id": "p2_2",
+            "id": "p22_2",
             "pos": {
-              "x": -5.0,
-              "y": -35.0
+              "x": 125.0,
+              "y": -25.0
             }
           }
         },
         {
           "Point": {
-            "id": "p2_3",
+            "id": "p22_3",
             "pos": {
-              "x": -85.0,
-              "y": -35.0
-            }
-          }
-        },
-        {
-          "Line": {
-            "id": "rect_2_0",
-            "p1": "p2_0",
-            "p2": "p2_1"
-          }
-        },
-        {
-          "Line": {
-            "id": "rect_2_1",
-            "p1": "p2_1",
-            "p2": "p2_2"
-          }
-        },
-        {
-          "Line": {
-            "id": "rect_2_2",
-            "p1": "p2_2",
-            "p2": "p2_3"
-          }
-        },
-        {
-          "Line": {
-            "id": "rect_2_close",
-            "p1": "p2_3",
-            "p2": "p2_0"
-          }
-        },
-        {
-          "Point": {
-            "id": "p10_0",
-            "pos": {
-              "x": 55.311288741492746,
-              "y": 90.0
+              "x": 40.0,
+              "y": -30.0
             }
           }
         },
         {
           "Point": {
-            "id": "p10_1",
+            "id": "p22_4",
             "pos": {
-              "x": 35.15564437074637,
-              "y": 124.91060010942236
+              "x": -10.0,
+              "y": -30.0
             }
+          }
+        },
+        {
+          "Line": {
+            "id": "polypath_22_0",
+            "p1": "p22_0",
+            "p2": "p22_1"
+          }
+        },
+        {
+          "Line": {
+            "id": "polypath_22_1",
+            "p1": "p22_1",
+            "p2": "p22_2"
           }
         },
         {
           "Point": {
-            "id": "p10_2",
+            "id": "p22_7",
             "pos": {
-              "x": -5.155644370746362,
-              "y": 124.91060010942236
+              "x": 83.06896551724138,
+              "y": -37.172413793103445
             }
           }
         },
         {
-          "Point": {
-            "id": "p10_3",
-            "pos": {
-              "x": -25.311288741492746,
-              "y": 90.0
-            }
-          }
-        },
-        {
-          "Point": {
-            "id": "p10_4",
-            "pos": {
-              "x": -5.155644370746391,
-              "y": 55.08939989057766
-            }
-          }
-        },
-        {
-          "Point": {
-            "id": "p10_5",
-            "pos": {
-              "x": 35.15564437074637,
-              "y": 55.08939989057765
-            }
+          "Arc": {
+            "id": "polypath_22_2",
+            "center": "p22_7",
+            "start": "p22_2",
+            "end": "p22_3"
           }
         },
         {
           "Line": {
-            "id": "hexagon_10_0",
-            "p1": "p10_0",
-            "p2": "p10_1"
+            "id": "polypath_22_3",
+            "p1": "p22_3",
+            "p2": "p22_4"
           }
         },
         {
           "Line": {
-            "id": "hexagon_10_1",
-            "p1": "p10_1",
-            "p2": "p10_2"
-          }
-        },
-        {
-          "Line": {
-            "id": "hexagon_10_2",
-            "p1": "p10_2",
-            "p2": "p10_3"
-          }
-        },
-        {
-          "Line": {
-            "id": "hexagon_10_3",
-            "p1": "p10_3",
-            "p2": "p10_4"
-          }
-        },
-        {
-          "Line": {
-            "id": "hexagon_10_4",
-            "p1": "p10_4",
-            "p2": "p10_5"
-          }
-        },
-        {
-          "Line": {
-            "id": "hexagon_10_close",
-            "p1": "p10_5",
-            "p2": "p10_0"
+            "id": "polypath_22_close",
+            "p1": "p22_4",
+            "p2": "p22_0"
           }
         }
       ],
       "constraints": [
         {
-          "Diameter": {
-            "circle": "circle_0",
-            "value": 60.0
+          "Horizontal": "polypath_22_0"
+        },
+        {
+          "Horizontal": "polypath_22_0"
+        },
+        {
+          "Vertical": "polypath_22_close"
+        },
+        {
+          "Vertical": "polypath_22_1"
+        },
+        {
+          "Vertical": "polypath_22_1"
+        },
+        {
+          "Horizontal": "polypath_22_3"
+        },
+        {
+          "Length": {
+            "line": "polypath_22_1",
+            "value": 85.0
+          }
+        },
+        {
+          "Length": {
+            "line": "polypath_22_0",
+            "value": 135.0
+          }
+        },
+        {
+          "Length": {
+            "line": "polypath_22_close",
+            "value": 80.0
+          }
+        },
+        {
+          "Length": {
+            "line": "polypath_22_3",
+            "value": 50.0
           }
         }
       ]
@@ -196,14 +146,50 @@
     "annotations": [
       {
         "target": {
-          "CircleDiameter": {
-            "circle": "circle_0"
+          "LineLength": {
+            "line": "polypath_22_1"
           }
         },
-        "value": 60.0,
+        "value": 85.0,
         "offset": [
-          -140.0,
-          65.0
+          145.0,
+          -80.0
+        ]
+      },
+      {
+        "target": {
+          "LineLength": {
+            "line": "polypath_22_0"
+          }
+        },
+        "value": 135.0,
+        "offset": [
+          10.0,
+          -130.0
+        ]
+      },
+      {
+        "target": {
+          "LineLength": {
+            "line": "polypath_22_close"
+          }
+        },
+        "value": 80.0,
+        "offset": [
+          -80.0,
+          -85.0
+        ]
+      },
+      {
+        "target": {
+          "LineLength": {
+            "line": "polypath_22_3"
+          }
+        },
+        "value": 50.0,
+        "offset": [
+          -30.0,
+          0.0
         ]
       }
     ]

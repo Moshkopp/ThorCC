@@ -169,11 +169,32 @@ enum DrawObject {
     #[serde(rename = "POLYLINE")]
     Polyline {
         points: Vec<[f64; 2]>,
+        #[serde(default)]
+        closed: bool,
+    },
+    #[serde(rename = "POLYPATH")]
+    PolyPath {
+        points: Vec<[f64; 2]>,
+        segments: Vec<PolyPathSegment>,
+        #[serde(default)]
+        closed: bool,
     },
     #[serde(rename = "SPLINE")]
     Spline {
         points: Vec<[f64; 2]>,
     },
+    Arc {
+        center: [f64; 2],
+        start: [f64; 2],
+        end: [f64; 2],
+    },
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+enum PolyPathSegment {
+    Line,
+    Arc { center: [f64; 2] },
 }
 
 #[derive(RustEmbed, Clone)]
@@ -1219,7 +1240,9 @@ impl DrawObject {
             DrawObject::Hexagon { .. } => "Hexagon",
             DrawObject::Octagon { .. } => "Octagon",
             DrawObject::Polyline { .. } => "Polyline",
+            DrawObject::PolyPath { .. } => "PolyPath",
             DrawObject::Spline { .. } => "Spline",
+            DrawObject::Arc { .. } => "Arc",
         }
     }
 }
@@ -1266,11 +1289,27 @@ fn add_object_to_project(project: &mut Project, object: DrawObject) {
         DrawObject::Octagon { center, radius } => {
             add_regular_polygon(project, object_index, "octagon", center, radius, 8)
         }
-        DrawObject::Polyline { points } => {
-            add_polyline(project, object_index, "polyline", &points, false)
+        DrawObject::Polyline { points, closed } => {
+            add_polyline(project, object_index, "polyline", &points, closed)
         }
+        DrawObject::PolyPath {
+            points,
+            segments,
+            closed,
+        } => add_polypath(project, object_index, "polypath", &points, &segments, closed),
         DrawObject::Spline { points } => {
             add_polyline(project, object_index, "spline", &points, false)
+        }
+        DrawObject::Arc { center, start, end } => {
+            let center_id = add_point(project, object_index, 0, center);
+            let start_id = add_point(project, object_index, 1, start);
+            let end_id = add_point(project, object_index, 2, end);
+            project.sketch.entities.push(Entity::Arc {
+                id: format!("arc_{}", object_index),
+                center: center_id,
+                start: start_id,
+                end: end_id,
+            });
         }
     }
 }
@@ -1318,6 +1357,59 @@ fn add_polyline(
             p1: point_ids[idx].clone(),
             p2: point_ids[idx + 1].clone(),
         });
+    }
+
+    if close && point_ids.len() > 2 {
+        project.sketch.entities.push(Entity::Line {
+            id: format!("{}_{}_close", prefix, object_index),
+            p1: point_ids[point_ids.len() - 1].clone(),
+            p2: point_ids[0].clone(),
+        });
+    }
+}
+
+fn add_polypath(
+    project: &mut Project,
+    object_index: usize,
+    prefix: &str,
+    points: &[[f64; 2]],
+    segments: &[PolyPathSegment],
+    close: bool,
+) {
+    if points.len() < 2 {
+        return;
+    }
+
+    let segment_count = (points.len() - 1).min(segments.len());
+    if segment_count == 0 {
+        return;
+    }
+
+    let point_ids: Vec<String> = points
+        .iter()
+        .enumerate()
+        .map(|(idx, point)| add_point(project, object_index, idx, *point))
+        .collect();
+
+    for idx in 0..segment_count {
+        match segments.get(idx) {
+            Some(PolyPathSegment::Line) | None => {
+                project.sketch.entities.push(Entity::Line {
+                    id: format!("{}_{}_{}", prefix, object_index, idx),
+                    p1: point_ids[idx].clone(),
+                    p2: point_ids[idx + 1].clone(),
+                });
+            }
+            Some(PolyPathSegment::Arc { center }) => {
+                let center_id = add_point(project, object_index, points.len() + idx, *center);
+                project.sketch.entities.push(Entity::Arc {
+                    id: format!("{}_{}_{}", prefix, object_index, idx),
+                    center: center_id,
+                    start: point_ids[idx].clone(),
+                    end: point_ids[idx + 1].clone(),
+                });
+            }
+        }
     }
 
     if close && point_ids.len() > 2 {

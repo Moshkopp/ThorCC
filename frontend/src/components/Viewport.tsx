@@ -1,12 +1,13 @@
 import { Component, createEffect, onMount, onCleanup } from 'solid-js';
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls';
-import { DimensionAnnotation, DimensionTarget, DrawObject, Sketch, SketchConstraint } from '../api/client';
+import { DimensionAnnotation, DimensionTarget, DrawObject, PolyPathSegment, Sketch, SketchConstraint } from '../api/client';
 
 interface ViewportProps {
   mode: 'Sketch' | 'Nesting' | 'CAM' | 'Simulation';
   activeTool: string | null;
   polygonSides?: number;
+  polylineMode?: 'line' | 'arc-half' | 'arc-quarter';
   toolActionVersion: number;
   sketch: Sketch | null;
   annotations: DimensionAnnotation[];
@@ -22,7 +23,7 @@ interface ViewportProps {
   onFeedback: (message: string) => void;
 }
 
-type SelectableKind = 'line' | 'circle' | 'point' | 'dimension' | 'rect-center';
+type SelectableKind = 'line' | 'circle' | 'point' | 'dimension' | 'rect-center' | 'arc';
 type DimensionMode = 'line' | 'radius' | 'diameter';
 
 interface SelectableMeta {
@@ -39,6 +40,7 @@ interface SelectableMeta {
   p1?: string;
   p2?: string;
   centerPoint?: string;
+  mode?: 'arc-half' | 'arc-quarter';
   annotationIndex?: number;
   rectKey?: string;        // set on rect corner points
   cornerIds?: string[];    // set on center handle
@@ -75,12 +77,23 @@ interface DimensionAnnotation {
   object: THREE.Object3D;
 }
 
+interface ArcSnapshot {
+  centerId: string;
+  p1: string;
+  p2: string;
+  origStart: THREE.Vector3;
+  origEnd: THREE.Vector3;
+  origCenter: THREE.Vector3;
+  perpRatio: number;
+}
+
 interface DragState {
   object: THREE.Object3D;
   startWorld: THREE.Vector3;
   updates: Map<string, THREE.Vector3>;
   originals: Map<string, THREE.Vector3>;
   dimensionOffsets: Map<number, THREE.Vector3>;
+  arcSnapshots: ArcSnapshot[];
   moved: boolean;
 }
 
@@ -140,6 +153,8 @@ const Viewport: Component<ViewportProps> = (props) => {
   let startPoint: THREE.Vector3 | null = null;
   let lastWorldPoint: THREE.Vector3 | null = null;
   let polyPoints: THREE.Vector3[] = [];
+  let polySegments: PolyPathSegment[] = [];
+  let lastPolyMouseEvent: MouseEvent | null = null;
   let selected: THREE.Object3D[] = [];
   let selectionDrag: { start: { x: number; y: number }; current: { x: number; y: number }; active: boolean } | null = null;
   let dragState: DragState | null = null;
@@ -287,6 +302,8 @@ const Viewport: Component<ViewportProps> = (props) => {
         isDrawing = false;
         startPoint = null;
         polyPoints = [];
+        polySegments = [];
+        lastPolyMouseEvent = null;
         clearSelection();
         controls.enabled = true;
     };
@@ -501,6 +518,15 @@ const Viewport: Component<ViewportProps> = (props) => {
             const radius = Math.abs(edge.x - center.x);
             return Math.abs(Math.hypot(point.x - center.x, point.y - center.y) - radius);
         }
+        if (meta.kind === 'arc' && meta.center && meta.start && meta.end) {
+            const samples = arcPoints(meta.center, meta.start, meta.end, 32).map((p) => worldToScreen(new THREE.Vector3(p.x, p.y, 0)));
+            let best = Number.POSITIVE_INFINITY;
+            for (let i = 0; i + 1 < samples.length; i++) {
+                const d = distanceToSegment(point, samples[i], samples[i + 1]);
+                if (d < best) best = d;
+            }
+            return best;
+        }
         if ((meta.kind === 'point' || meta.kind === 'rect-center') && meta.pos) {
             const center = worldToScreen(meta.pos);
             return Math.hypot(point.x - center.x, point.y - center.y);
@@ -541,6 +567,18 @@ const Viewport: Component<ViewportProps> = (props) => {
               top: center.y - radius,
               bottom: center.y + radius,
             };
+        }
+        if (meta.kind === 'arc' && meta.center && meta.start && meta.end) {
+            const samples = arcPoints(meta.center, meta.start, meta.end, 24).map((p) => worldToScreen(new THREE.Vector3(p.x, p.y, 0)));
+            if (samples.length === 0) return null;
+            let left = samples[0].x, right = samples[0].x, top = samples[0].y, bottom = samples[0].y;
+            for (const s of samples) {
+                if (s.x < left) left = s.x;
+                if (s.x > right) right = s.x;
+                if (s.y < top) top = s.y;
+                if (s.y > bottom) bottom = s.y;
+            }
+            return { left, right, top, bottom };
         }
         return null;
     };
@@ -937,6 +975,29 @@ const Viewport: Component<ViewportProps> = (props) => {
                   centerPoint: entity.Circle.center,
                 });
             }
+            if ('Arc' in entity) {
+                const center = points.get(entity.Arc.center);
+                const start = points.get(entity.Arc.start);
+                const end = points.get(entity.Arc.end);
+                if (center && start && end) {
+                    const line = new THREE.Line(
+                        new THREE.BufferGeometry().setFromPoints(arcPoints(center, start, end)),
+                        new THREE.LineBasicMaterial({ color: CAD_COLORS.sketch, transparent: true, opacity: 0.86 })
+                    );
+                    addSelectable(line, {
+                        entityId: entity.Arc.id,
+                        kind: 'arc',
+                        label: entity.Arc.id,
+                        p1: entity.Arc.start,
+                        p2: entity.Arc.end,
+                        start: start.clone(),
+                        end: end.clone(),
+                        centerPoint: entity.Arc.center,
+                        center: center.clone(),
+                        radius: center.distanceTo(start),
+                    });
+                }
+            }
         }
         // Detect triangle/hexagon/octagon/pentagon groups
         const polySides: Record<string, number> = { triangle: 3, pentagon: 5, hexagon: 6, octagon: 8 };
@@ -1055,6 +1116,90 @@ const Viewport: Component<ViewportProps> = (props) => {
         renderer.domElement.style.cursor = cursor;
     };
 
+    const isNearPolyStart = (e: MouseEvent, worldPoint?: THREE.Vector3) => {
+        if (polyPoints.length < 2 || !containerRef) return false;
+        // World-space: snapped cursor is at start (most reliable with grid snap)
+        if (worldPoint && worldPoint.distanceTo(polyPoints[0]) < 8) return true;
+        // Screen-space fallback
+        const startScreen = worldToScreen(polyPoints[0]);
+        const rect = containerRef.getBoundingClientRect();
+        return Math.hypot(e.clientX - rect.left - startScreen.x, e.clientY - rect.top - startScreen.y) < 18;
+    };
+
+    const makePolyNodeSprite = (isCloseTarget: boolean) => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 32; canvas.height = 32;
+        const ctx = canvas.getContext('2d')!;
+        if (isCloseTarget) {
+            ctx.strokeStyle = 'rgba(255,230,60,1)'; ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(16, 16, 10, 0, Math.PI * 2); ctx.stroke();
+            ctx.fillStyle = 'rgba(255,230,60,0.45)'; ctx.fill();
+        } else {
+            ctx.strokeStyle = 'rgba(60,205,224,0.92)'; ctx.lineWidth = 2.5;
+            ctx.beginPath(); ctx.arc(16, 16, 7, 0, Math.PI * 2); ctx.stroke();
+            ctx.fillStyle = 'rgba(60,205,224,0.32)'; ctx.fill();
+        }
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), transparent: true, depthTest: false }));
+        sprite.userData.screenSize = { width: 14, height: 14 };
+        sprite.renderOrder = 50;
+        return sprite;
+    };
+
+    const finishPolyline = (closed: boolean) => {
+        if (tempObject) { scene.remove(tempObject); tempObject = null; }
+        if (props.activeTool === 'spline') {
+            if (polyPoints.length > 1) {
+                props.onObjectAdded({ type: 'SPLINE', points: polyPoints.map((p) => [p.x, p.y]) });
+            }
+        } else if (polyPoints.length > 1) {
+            if (polySegments.some((segment) => segment.type === 'Arc')) {
+                props.onObjectAdded({
+                    type: 'POLYPATH',
+                    points: polyPoints.map((p) => [p.x, p.y]),
+                    segments: polySegments,
+                    closed,
+                });
+            } else {
+                props.onObjectAdded({
+                    type: 'POLYLINE',
+                    points: polyPoints.map((p) => [p.x, p.y]),
+                    closed,
+                });
+            }
+        }
+        polyPoints = [];
+        polySegments = [];
+        lastPolyMouseEvent = null;
+        isDrawing = false;
+        controls.enabled = true;
+    };
+
+    const arcSegmentFromClick = (
+        start: THREE.Vector3,
+        prev: THREE.Vector3,
+        target: THREE.Vector3,
+        mode: 'arc-half' | 'arc-quarter'
+    ) => {
+        const chord = new THREE.Vector3().subVectors(target, start);
+        const fallbackCenter = new THREE.Vector3().addVectors(start, target).multiplyScalar(0.5);
+        if (chord.lengthSq() < 1e-6) return { center: fallbackCenter, end: target.clone() };
+
+        if (mode === 'arc-half') {
+            return { center: fallbackCenter, end: target.clone() };
+        }
+
+        const tangent = new THREE.Vector3().subVectors(start, prev).normalize();
+        const normal = new THREE.Vector3(-tangent.y, tangent.x, 0);
+        const normalDistance = chord.dot(normal);
+        if (Math.abs(normalDistance) < 1e-6) return { center: fallbackCenter, end: target.clone() };
+
+        const radius = chord.lengthSq() / (2 * normalDistance);
+        return {
+            center: start.clone().add(normal.multiplyScalar(radius)),
+            end: target.clone(),
+        };
+    };
+
     const updateCursor = (e: MouseEvent) => {
         if (dragState || dimensionDragState || circleRadiusDragState || rectDragState || polyVertexDragState) { setCursor('grabbing'); return; }
         if (selectionDrag?.active) { setCursor('crosshair'); return; }
@@ -1156,7 +1301,7 @@ const Viewport: Component<ViewportProps> = (props) => {
             const meta = metaOf(object);
             if (meta.kind === 'dimension' && meta.annotationIndex !== undefined) {
                 dimensionsToDelete.add(meta.annotationIndex);
-            } else if (meta.kind === 'line' || meta.kind === 'circle') {
+            } else if (meta.kind === 'line' || meta.kind === 'circle' || meta.kind === 'arc') {
                 entities.add(meta.entityId);
             }
         }
@@ -1172,6 +1317,7 @@ const Viewport: Component<ViewportProps> = (props) => {
     const draggablePointIds = (meta: SelectableMeta) => {
         if (meta.kind === 'point' && meta.pointId) return [meta.pointId];
         if (meta.kind === 'line' && meta.p1 && meta.p2) return [meta.p1, meta.p2];
+        if (meta.kind === 'arc' && meta.p1 && meta.p2) return [meta.p1, meta.p2, meta.centerPoint].filter(Boolean) as string[];
         return [];
     };
 
@@ -1183,6 +1329,11 @@ const Viewport: Component<ViewportProps> = (props) => {
         if (meta.kind === 'line' && meta.p1 && meta.p2 && meta.start && meta.end) {
             originals.set(meta.p1, meta.start.clone());
             originals.set(meta.p2, meta.end.clone());
+        }
+        if (meta.kind === 'arc' && meta.p1 && meta.p2 && meta.start && meta.end) {
+            originals.set(meta.p1, meta.start.clone());
+            originals.set(meta.p2, meta.end.clone());
+            if (meta.centerPoint && meta.center) originals.set(meta.centerPoint, meta.center.clone());
         }
         return originals;
     };
@@ -1234,6 +1385,33 @@ const Viewport: Component<ViewportProps> = (props) => {
         geometry?.computeBoundingSphere();
     };
 
+    const arcPoints = (center: THREE.Vector3, start: THREE.Vector3, end: THREE.Vector3, segments = 50) => {
+        const radius = center.distanceTo(start);
+        const startAngle = Math.atan2(start.y - center.y, start.x - center.x);
+        const rawEndAngle = Math.atan2(end.y - center.y, end.x - center.x);
+        let delta = rawEndAngle - startAngle;
+        while (delta > Math.PI) delta -= Math.PI * 2;
+        while (delta <= -Math.PI) delta += Math.PI * 2;
+        const endAngle = startAngle + delta;
+        return new THREE.EllipseCurve(
+            center.x,
+            center.y,
+            radius,
+            radius,
+            startAngle,
+            endAngle,
+            delta < 0
+        ).getPoints(segments);
+    };
+
+    const updateArcGeometry = (object: THREE.Object3D, start: THREE.Vector3, end: THREE.Vector3, center: THREE.Vector3) => {
+        const geometry = (object as THREE.Line).geometry as THREE.BufferGeometry | undefined;
+        if (!geometry) return;
+
+        geometry.setFromPoints(arcPoints(center, start, end));
+        geometry.computeBoundingSphere();
+    };
+
     const applyDragPreview = (updates: Map<string, THREE.Vector3>) => {
         for (const object of selectables) {
             const meta = metaOf(object);
@@ -1254,6 +1432,15 @@ const Viewport: Component<ViewportProps> = (props) => {
                 const center = updates.get(meta.centerPoint);
                 if (!center) continue;
                 object.position.copy(center);
+                meta.center = center.clone();
+            } else if (meta.kind === 'arc' && meta.p1 && meta.p2 && meta.start && meta.end) {
+                const start = updates.get(meta.p1) ?? meta.start;
+                const end = updates.get(meta.p2) ?? meta.end;
+                const center = meta.centerPoint ? (updates.get(meta.centerPoint) ?? meta.center) : meta.center;
+                if (!center || (!updates.has(meta.p1) && !updates.has(meta.p2) && !updates.has(meta.centerPoint ?? ''))) continue;
+                updateArcGeometry(object, start, end, center);
+                meta.start = start.clone();
+                meta.end = end.clone();
                 meta.center = center.clone();
             }
         }
@@ -1531,6 +1718,7 @@ const Viewport: Component<ViewportProps> = (props) => {
             originals,
             updates: new Map(originals),
             dimensionOffsets: dimensionOriginalOffsets(),
+            arcSnapshots: buildArcSnapshots(originals),
             moved: false,
         };
         controls.enabled = false;
@@ -1558,6 +1746,57 @@ const Viewport: Component<ViewportProps> = (props) => {
         return true;
     };
 
+    const buildArcSnapshots = (originals: Map<string, THREE.Vector3>) => {
+        const snapshots: ArcSnapshot[] = [];
+        const seen = new Set<string>();
+        for (const object of selectables) {
+            const meta = metaOf(object);
+            if (meta.kind !== 'arc') continue;
+            if (!meta.p1 || !meta.p2 || !meta.centerPoint) continue;
+            if (!meta.start || !meta.end || !meta.center) continue;
+            if (!originals.has(meta.p1) && !originals.has(meta.p2)) continue;
+            if (seen.has(meta.entityId)) continue;
+            seen.add(meta.entityId);
+
+            const chord = new THREE.Vector3().subVectors(meta.end, meta.start);
+            const chordLen = chord.length();
+            const midpoint = new THREE.Vector3().addVectors(meta.start, meta.end).multiplyScalar(0.5);
+            let perpRatio = 0;
+            if (chordLen > 1e-9) {
+                const perp = new THREE.Vector3(-chord.y / chordLen, chord.x / chordLen, 0);
+                const offset = new THREE.Vector3().subVectors(meta.center, midpoint);
+                perpRatio = offset.dot(perp) / (chordLen * 0.5);
+            }
+            snapshots.push({
+                centerId: meta.centerPoint,
+                p1: meta.p1,
+                p2: meta.p2,
+                origStart: meta.start.clone(),
+                origEnd: meta.end.clone(),
+                origCenter: meta.center.clone(),
+                perpRatio,
+            });
+        }
+        return snapshots;
+    };
+
+    const augmentArcCenters = (updates: Map<string, THREE.Vector3>, snapshots: ArcSnapshot[]) => {
+        for (const snap of snapshots) {
+            const newStart = updates.get(snap.p1) ?? snap.origStart;
+            const newEnd = updates.get(snap.p2) ?? snap.origEnd;
+            const chord = new THREE.Vector3().subVectors(newEnd, newStart);
+            const chordLen = chord.length();
+            const midpoint = new THREE.Vector3().addVectors(newStart, newEnd).multiplyScalar(0.5);
+            if (chordLen < 1e-9) {
+                updates.set(snap.centerId, midpoint);
+                continue;
+            }
+            const perp = new THREE.Vector3(-chord.y / chordLen, chord.x / chordLen, 0);
+            const offset = perp.multiplyScalar(snap.perpRatio * chordLen * 0.5);
+            updates.set(snap.centerId, midpoint.add(offset));
+        }
+    };
+
     const updateDrag = (point: THREE.Vector3) => {
         if (!dragState) return;
         const delta = point.clone().sub(dragState.startWorld);
@@ -1566,6 +1805,7 @@ const Viewport: Component<ViewportProps> = (props) => {
         for (const [id, original] of dragState.originals) {
             updates.set(id, original.clone().add(delta));
         }
+        augmentArcCenters(updates, dragState.arcSnapshots);
         dragState.updates = updates;
         applyDragPreview(updates);
         applyDimensionMovePreview(dragState);
@@ -1768,6 +2008,10 @@ const Viewport: Component<ViewportProps> = (props) => {
     const handleMouseDown = (e: MouseEvent) => {
         if (!props.activeTool) return;
         if (e.button === 2) {
+            if (props.activeTool === 'polyline' || props.activeTool === 'spline') {
+                finishPolyline(false);
+                return;
+            }
             cancelActiveAction();
             props.onSelectTool();
             props.onFeedback('SELECT: ready');
@@ -1812,18 +2056,36 @@ const Viewport: Component<ViewportProps> = (props) => {
 
         if (props.activeTool === 'polyline' || props.activeTool === 'spline') {
             isDrawing = true;
-            polyPoints.push(point.clone());
+            if (props.activeTool === 'polyline' && isNearPolyStart(e, point)) { finishPolyline(true); return; }
             
-            if (e.button === 2 || e.detail === 2) { // Right click or double click to finish
-                if (polyPoints.length > 1) {
-                    props.onObjectAdded({ type: props.activeTool.toUpperCase() as 'POLYLINE' | 'SPLINE', points: polyPoints.map(p => [p.x, p.y]) });
+            if (props.activeTool === 'polyline' && polyPoints.length >= 1) {
+                const start = polyPoints[polyPoints.length - 1];
+                if (props.polylineMode === 'line' || polyPoints.length < 2) {
+                    polySegments.push({ type: 'Line' });
+                    polyPoints.push(point.clone());
+                    props.onFeedback(`POLYLINE: ${polyPoints.length} Punkte — Rechtsklick beenden, Startpunkt schließen`);
+                    return;
+                } else {
+                    const prev = polyPoints[polyPoints.length - 2];
+                    
+                    if (props.polylineMode === 'arc-half') {
+                        const { center, end } = arcSegmentFromClick(start, prev, point, 'arc-half');
+                        polySegments.push({ type: 'Arc', center: [center.x, center.y] });
+                        polyPoints.push(end.clone());
+                        props.onFeedback(`POLYLINE: ${polyPoints.length} Punkte — Rechtsklick beenden, Startpunkt schließen`);
+                        return;
+                    } else if (props.polylineMode === 'arc-quarter') {
+                        const { center, end } = arcSegmentFromClick(start, prev, point, 'arc-quarter');
+                        polySegments.push({ type: 'Arc', center: [center.x, center.y] });
+                        polyPoints.push(end.clone());
+                        props.onFeedback(`POLYLINE: ${polyPoints.length} Punkte — Rechtsklick beenden, Startpunkt schließen`);
+                        return;
+                    }
                 }
-                polyPoints = [];
-                isDrawing = false;
-                if (tempObject) scene.remove(tempObject);
-                tempObject = null;
-                controls.enabled = true;
             }
+
+            polyPoints.push(point.clone());
+            props.onFeedback(`POLYLINE: ${polyPoints.length} Punkte — Rechtsklick beenden, Startpunkt schließen`);
             return;
         }
 
@@ -1902,14 +2164,63 @@ const Viewport: Component<ViewportProps> = (props) => {
         const mat = new THREE.MeshBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true });
         
         if (props.activeTool === 'polyline' || props.activeTool === 'spline') {
-            const previewPoints = [...polyPoints, point.clone()];
-            if (previewPoints.length > 1) {
-                const geo = new THREE.BufferGeometry().setFromPoints(previewPoints);
-                tempObject = props.activeTool === 'spline' 
-                    ? new THREE.Line(new THREE.BufferGeometry().setFromPoints(new THREE.CatmullRomCurve3(previewPoints).getPoints(50)), new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true }))
-                    : new THREE.Line(geo, new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, opacity: 0.46, transparent: true }));
-                scene.add(tempObject);
+            lastPolyMouseEvent = e;
+            const nearStart = props.activeTool === 'polyline' && isNearPolyStart(e, point);
+            const group = new THREE.Group();
+            const sketchMat = new THREE.LineBasicMaterial({ color: CAD_COLORS.sketch, transparent: true, opacity: 0.8 });
+            const prevMat = new THREE.LineBasicMaterial({ color: CAD_COLORS.preview, transparent: true, opacity: 0.46 });
+
+            if (props.activeTool === 'spline') {
+                const allPts = [...polyPoints, point.clone()];
+                if (allPts.length > 1) {
+                    const curve = new THREE.CatmullRomCurve3(allPts);
+                    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(60)), prevMat));
+                }
+            } else {
+                for (let i = 0; i < polySegments.length && i + 1 < polyPoints.length; i++) {
+                    const segment = polySegments[i];
+                    const start = polyPoints[i];
+                    const end = polyPoints[i + 1];
+                    if (segment.type === 'Arc') {
+                        const center = new THREE.Vector3(segment.center[0], segment.center[1], 0);
+                        group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPoints(center, start, end, 30)), sketchMat));
+                    } else {
+                        group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, end]), sketchMat));
+                    }
+                }
+                // Preview segment from last confirmed to cursor
+                if (polyPoints.length >= 1) {
+                    const start = polyPoints[polyPoints.length - 1];
+                    if (props.polylineMode === 'line' || polyPoints.length < 2) {
+                        group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([start, point]), prevMat));
+                    } else {
+                        const prev = polyPoints[polyPoints.length - 2];
+                        
+                        if (props.polylineMode === 'arc-half') {
+                            const { center, end } = arcSegmentFromClick(start, prev, point, 'arc-half');
+                            group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPoints(center, start, end, 30)), prevMat));
+                        } else if (props.polylineMode === 'arc-quarter') {
+                            const { center, end } = arcSegmentFromClick(start, prev, point, 'arc-quarter');
+                            group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(arcPoints(center, start, end, 20)), prevMat));
+                        }
+                    }
+                }
+                // Close preview
+                if (nearStart && polyPoints.length >= 2) {
+                    const closeMat = new THREE.LineBasicMaterial({ color: 0xffdd30, transparent: true, opacity: 0.5 });
+                    group.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints([polyPoints[polyPoints.length - 1], polyPoints[0]]), closeMat));
+                }
             }
+
+            // Node sprites at each confirmed point
+            for (let i = 0; i < polyPoints.length; i++) {
+                const sprite = makePolyNodeSprite(i === 0 && nearStart);
+                sprite.position.copy(polyPoints[i]);
+                group.add(sprite);
+            }
+
+            tempObject = group;
+            scene.add(tempObject);
             return;
         }
 

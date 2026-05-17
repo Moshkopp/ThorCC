@@ -27,3 +27,16 @@
 - [ ] **Radius** — Kreis-Radius
 - [ ] **Diameter** — Kreis-Durchmesser
 - [ ] **Angle** — Winkel einer Linie / zwischen zwei Linien
+
+## CAM / Toolpaths
+
+- [ ] **CAM-Grundsatz** — Toolpaths deterministisch über Geometrie-/CAM-Algorithmen erzeugen, nicht direkt per LLM.
+- [ ] **Lokale KI als CAM-Assistent** — Später optional für Parametervorschläge, Operationserklärung, G-Code-Prüfung und Plausibilitätswarnungen.
+- [ ] **Toolpath-Datenmodell** — Operation, Tool, Stock, Geometry, Toolpath, Linking-Moves und Safety-Informationen definieren.
+- [ ] **Werkzeug-/Material-/Maschinenprofile** — Fräserdaten, Materialwerte, Vorschub/Drehzahl, Maschinenlimits und Postprozessor-Grundlagen.
+- [ ] **2D-Konturstrategie** — Außen-/Innenkonturen mit Werkzeugradiuskompensation erzeugen.
+- [ ] **Pocketing Basis** — 2D-Taschen mit konstantem Step-over, Inseln und Innenkonturen unterstützen.
+- [ ] **Materialabtragsvorschau** — Simulieren/visualisieren, welche Bereiche bereits geräumt sind.
+- [ ] **Restmaterial-Erkennung** — Nachfolgende Bahnen nur für noch vorhandenes Material berechnen.
+- [ ] **Adaptive-ähnliches Clearing** — Werkzeugumschlingung begrenzen, Vollnut vermeiden, Übergänge glätten.
+- [ ] **Echtes Adaptive Clearing** — Dynamische Engagement-Berechnung, Kollisionsprüfung, Lastmodell und stabile Linking-Moves.
